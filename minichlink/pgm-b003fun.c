@@ -40,6 +40,7 @@ struct B003FunProgrammerStruct
 	int scratchpad_size;
 	int scratchpad_data_size;
 	int no_eight_byte;
+	int fixed_report_size;
 	int crc32_loader_uploaded;
 	int send_retry_delay_us;
 };
@@ -312,7 +313,18 @@ static int CommitOp( struct B003FunProgrammerStruct * eps, int send_data_len, in
 	uint8_t feature_id = 0xaa;
 	uint32_t magic_go = 0x1234abcd;
 	uint32_t pad_size = eps->commandplace + send_data_len + 4;
-	if ( pad_size <= eps->scratchpad_size )
+	if( eps->fixed_report_size )
+	{
+		if( pad_size > (uint32_t)eps->fixed_report_size )
+		{
+			fprintf(stderr, "Error! Command buffer is bigger than fixed report size\n");
+			return -10;
+		}
+		pad_size = (uint32_t)eps->fixed_report_size;
+		memcpy( eps->commandbuffer + pad_size - 4, &magic_go, 4 );
+		eps->commandbuffer[0] = feature_id;
+	}
+	else if ( pad_size <= eps->scratchpad_size )
 	{
 		if( pad_size > 5248 ) pad_size = 6272;
 		else if( pad_size > 4096 ) pad_size = 5248;
@@ -390,7 +402,12 @@ resend:
 		max_timeout = 200;
 	}
 
-	if( receive_data_len ) {
+	if( eps->fixed_report_size )
+	{
+		pad_size = (uint32_t)eps->fixed_report_size;
+		feature_id = 0xaa;
+	}
+	else if( receive_data_len ) {
 		pad_size = receive_data_len + eps->commandplace + 4;
 
 		if( pad_size <= eps->scratchpad_size )
@@ -753,35 +770,43 @@ static int B003FunSetupInterface( void * dev )
 	WriteOpArb( eps, halt_wait_blob, sizeof(halt_wait_blob) );
 	if( CommitOp( eps, 0, 0 ) ) return -5;
 
-	// Check for minimum 8 byte feature
-	eps->respbuffer[0] = 0xa8;
-	int r = hid_get_feature_report( eps->hd, eps->respbuffer, 8 );
-	if( r != 8 ) eps->no_eight_byte = 1;
-	else eps->no_eight_byte = 0;
-	// Check for the maximum buffer size available
-	eps->respbuffer[0] = 0xad;
-	// 4096 is the maximum size for windows and mac
-	r = hid_get_feature_report( eps->hd, eps->respbuffer, 4096 );
-	if( r >= 0 ) // If not on Windows, or guessed the first time
+	if( eps->fixed_report_size )
 	{
-		eps->scratchpad_size = r;
-		// Check once more, if we can go higher
-		// On windows and mac it will fail, on linux we will get an actual maximum HID report size
-		eps->respbuffer[0] = 0xb0;
-		r = hid_get_feature_report( eps->hd, eps->respbuffer, 6144+128 );
-		if( r > eps->scratchpad_size ) eps->scratchpad_size = r;
+		eps->no_eight_byte = 1;
+		eps->scratchpad_size = eps->fixed_report_size;
 	}
 	else
 	{
-		for( int i = 0xac; i > 0xaa; i-- )
+		// Check for minimum 8 byte feature
+		eps->respbuffer[0] = 0xa8;
+		int r = hid_get_feature_report( eps->hd, eps->respbuffer, 8 );
+		if( r != 8 ) eps->no_eight_byte = 1;
+		else eps->no_eight_byte = 0;
+		// Check for the maximum buffer size available
+		eps->respbuffer[0] = 0xad;
+		// 4096 is the maximum size for windows and mac
+		r = hid_get_feature_report( eps->hd, eps->respbuffer, 4096 );
+		if( r >= 0 ) // If not on Windows, or guessed the first time
 		{
-			int id_size = 5120 - (1024*(0xaf - i)) + 128;
-			eps->respbuffer[0] = i;
-			r = hid_get_feature_report( eps->hd, eps->respbuffer, id_size );
-			if( r == id_size )
+			eps->scratchpad_size = r;
+			// Check once more, if we can go higher
+			// On windows and mac it will fail, on linux we will get an actual maximum HID report size
+			eps->respbuffer[0] = 0xb0;
+			r = hid_get_feature_report( eps->hd, eps->respbuffer, 6144+128 );
+			if( r > eps->scratchpad_size ) eps->scratchpad_size = r;
+		}
+		else
+		{
+			for( int i = 0xac; i > 0xaa; i-- )
 			{
-				eps->scratchpad_size = id_size;
-				break;
+				int id_size = 5120 - (1024*(0xaf - i)) + 128;
+				eps->respbuffer[0] = i;
+				r = hid_get_feature_report( eps->hd, eps->respbuffer, id_size );
+				if( r == id_size )
+				{
+					eps->scratchpad_size = id_size;
+					break;
+				}
 			}
 		}
 	}
@@ -1442,7 +1467,12 @@ void * TryInit_B003Fun(uint32_t id)
 	eps->scratchpad_size = 128;
 	eps->scratchpad_data_size = 64;
 	eps->no_eight_byte = 1;
+	if( id == B003FUN_FAST_TEST_VIDPID )
+	{
+		eps->fixed_report_size = B003FunEnvInt( "B003FUN_FORCE_REPORT_SIZE", 340, 0, 8196 );
+	}
 	eps->send_retry_delay_us = B003FunEnvInt( "B003FUN_SEND_RETRY_DELAY_US", 2000, 0, 50000 );
+	B003FunTimingPrintCount( "fixed_report_size", (uint32_t)eps->fixed_report_size );
 	B003FunTimingPrintCount( "send_retry_delay_us", (uint32_t)eps->send_retry_delay_us );
 	memset( &MCF, 0, sizeof( MCF ) );
 	MCF.WriteReg32 = 0;
