@@ -76,3 +76,35 @@ The replacement release asset should:
 - include required runtime DLLs under `bin/`,
 - avoid brand-specific names in the release tag, asset names, archive contents, metadata, and release notes,
 - publish exact SHA-256 and byte size for downstream package-index work.
+
+## Test release
+
+| Item | Value |
+|---|---|
+| Release | `b003fast-upstream-20260627.1` |
+| URL | https://github.com/lopple/ch32fun/releases/tag/b003fast-upstream-20260627.1 |
+| Type | GitHub prerelease |
+| Target commit | `b536f20ccfa83d4a15636a6fd37f55110da92ccc` |
+| Windows asset | `minichlink-b003fast-upstream-20260627.1-windows-x86_64.zip` |
+| Windows asset size | `228640` bytes |
+| Windows asset SHA-256 | `66c3213bd23e23d20d027eae8eec9fb0235245e19a09a7ee521aeb8078a55aa4` |
+| Checksum asset | `SHA256SUMS-windows.txt` |
+
+Downloaded asset verification after publishing:
+
+```text
+minichlink-b003fast-upstream-20260627.1-windows-x86_64.zip 228640 bytes
+sha256: 66c3213bd23e23d20d027eae8eec9fb0235245e19a09a7ee521aeb8078a55aa4
+```
+
+Published archive layout:
+
+```text
+minichlink-b003fast-upstream-20260627.1-windows-x86_64/LICENSE
+minichlink-b003fast-upstream-20260627.1-windows-x86_64/metadata.json
+minichlink-b003fast-upstream-20260627.1-windows-x86_64/README.md
+minichlink-b003fast-upstream-20260627.1-windows-x86_64/bin/libusb-1.0.dll
+minichlink-b003fast-upstream-20260627.1-windows-x86_64/bin/minichlink.exe
+```
+
+
