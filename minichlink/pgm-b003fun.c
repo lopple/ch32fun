@@ -746,7 +746,16 @@ static int InternalB003FunBoot( void * dev )
 	eps->no_get_report = 1;
 	int boot_result = CommitOp( eps, 0, 0 );
 	if( boot_result < 0 ) return -5;
-	if( B003FunEnvEnabledDefault( "B003FUN_WAIT_USER_AFTER_BOOT", 1 ) )
+
+	int settle_ms = B003FunEnvInt( "B003FUN_BOOT_SETTLE_MS", 500, 0, 30000 );
+	int wait_user_after_boot = B003FunEnvEnabledDefault( "B003FUN_WAIT_USER_AFTER_BOOT", 0 );
+	B003FunTimingPrintCount( "boot_settle_ms", (uint32_t)settle_ms );
+	B003FunTimingPrintCount( "boot_user_wait_enabled", (uint32_t)wait_user_after_boot );
+	hid_close( eps->hd );
+	eps->hd = 0;
+	if( settle_ms > 0 ) usleep( settle_ms * 1000 );
+
+	if( wait_user_after_boot )
 	{
 		int poll_ms = B003FunEnvInt( "B003FUN_USER_SCAN_POLL_MS", 50, 1, 1000 );
 		int timeout_ms = B003FunEnvInt( "B003FUN_USER_SCAN_TIMEOUT_MS", 15000, 100, 30000 );
@@ -754,8 +763,6 @@ static int InternalB003FunBoot( void * dev )
 		uint64_t wait_start_ms = B003FunTimingNowMS();
 		B003FunTimingPrintCount( "boot_user_wait_poll_ms", (uint32_t)poll_ms );
 		B003FunTimingPrintCount( "boot_user_wait_timeout_ms", (uint32_t)timeout_ms );
-		hid_close( eps->hd );
-		eps->hd = 0;
 		hid_device * user_hd = B003FunOpenUserVendorInterface( &attempts, poll_ms, timeout_ms );
 		B003FunTimingPrintCount( "boot_user_wait_attempts", attempts );
 		B003FunTimingPrint( "boot_user_wait", wait_start_ms );
