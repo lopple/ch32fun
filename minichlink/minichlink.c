@@ -37,6 +37,10 @@ static void readCSR( void * dev, uint32_t csr );
 static int DefaultRebootIntoBootloader( void * dev );
 struct MiniChlinkFunctions MCF;
 
+#define B003BOOT_LEGACY_VIDPID 0x1209b003
+#define B803BOOT_LEGACY_VIDPID 0x1209b803
+#define B003FAST_TEST_VIDPID   0x1209000a
+
 void * MiniCHLinkInitAsDLL( struct MiniChlinkFunctions ** MCFO, const init_hints_t* init_hints )
 {
 	void * dev = 0;
@@ -57,7 +61,11 @@ void * MiniCHLinkInitAsDLL( struct MiniChlinkFunctions ** MCFO, const init_hints
 		else if( strcmp( specpgm, "nchlink" ) == 0 )
 			dev = TryInit_NHCLink042();
 		else if( strcmp( specpgm, "b003boot" ) == 0 )
-			dev = TryInit_B003Fun(SimpleReadNumberInt(init_hints->serial_port, 0x1209b003));
+			dev = TryInit_B003Fun(SimpleReadNumberInt(init_hints->serial_port, B003BOOT_LEGACY_VIDPID));
+		else if( strcmp( specpgm, "b803boot" ) == 0 )
+			dev = TryInit_B003Fun(SimpleReadNumberInt(init_hints->serial_port, B803BOOT_LEGACY_VIDPID));
+		else if( strcmp( specpgm, "b003fast-test" ) == 0 )
+			dev = TryInit_B003Fun(SimpleReadNumberInt(init_hints->serial_port, B003FAST_TEST_VIDPID));
 		else if( strcmp( specpgm, "ardulink" ) == 0 )
 			dev = TryInit_Ardulink(init_hints);
 	}
@@ -80,7 +88,7 @@ void * MiniCHLinkInitAsDLL( struct MiniChlinkFunctions ** MCFO, const init_hints
 		{
 			fprintf( stderr, "Found NHC-Link042 Programmer\n" );
 		}
-		else if ((dev = TryInit_B003Fun(SimpleReadNumberInt(init_hints->serial_port, 0x1209b003))))
+		else if ((dev = TryInit_B003Fun(SimpleReadNumberInt(init_hints->serial_port, B003BOOT_LEGACY_VIDPID))))
 		{
 			fprintf( stderr, "Found B003Fun Bootloader\n" );
 		}
@@ -1069,8 +1077,9 @@ help:
 	fprintf( stderr, " -t Disable 3.3V\n" );
 	fprintf( stderr, " -f Disable 5V\n" );
 	fprintf( stderr, " -k Skip programmer initialization\n" );
-	fprintf( stderr, " -c [serial port for Ardulink, try /dev/ttyACM0 or COM11 etc] or [VID+PID of USB for b003boot, try 0x1209b003]\n" );
-	fprintf( stderr, " -C [specified programmer, eg. b003boot, ardulink, esp32s2chfun, funprog, isp, linke]\n" );
+	fprintf( stderr, " -c [serial port for Ardulink, try /dev/ttyACM0 or COM11 etc] or [VID+PID of USB for b003boot, try 0x1209b003, 0x1209b803, or test 0x1209000a]\n" );
+	fprintf( stderr, " -C [specified programmer, eg. b003boot, b803boot, b003fast-test, ardulink, esp32s2chfun, funprog, isp, linke]\n" );
+	fprintf( stderr, "    b003fast-test uses pid.codes test PID 1209:000A for development only\n" );
 	fprintf( stderr, " -l [programmer USB serial; omit for default device selection]\n" );
 	fprintf( stderr, " -u Clear all code flash - by power off (also can unbrick)\n" );
 	fprintf( stderr, " -a Reboot into Halt\n" );
