@@ -11,14 +11,18 @@
 
 #if defined(WINDOWS) || defined(WIN32) || defined(_WIN32)
 void Sleep(uint32_t dwMilliseconds);
+uint32_t GetTickCount(void);
 #define usleep( x ) Sleep( x / 1000 )
 #define sleep( x ) Sleep( x * 1000 )
 #else
+#include <time.h>
 #include <unistd.h>
 #endif
 
 #define MAX_USB_ERR 10000
 #define TERMINAL_FEATURE_ID 0xFD
+#define B003FUN_FAST_TEST_VIDPID 0x1209000a
+#define B003FUN_FAST_USER_VIDPID 0x1209c003
 #define B003FUN_CRC32_LOADER_ADDR 0x20000500
 #define B003FUN_CRC32_PARAM_OFFSET 32
 #define B003FUN_CRC32_RESULT_OFFSET 56
@@ -38,6 +42,52 @@ struct B003FunProgrammerStruct
 	int no_eight_byte;
 	int crc32_loader_uploaded;
 };
+
+static int B003FunEnvInt( const char * name, int default_value, int min_value, int max_value )
+{
+	const char * value = getenv( name );
+	if( !value || !value[0] ) return default_value;
+
+	char * endptr = 0;
+	long parsed = strtol( value, &endptr, 0 );
+	if( endptr == value ) return default_value;
+	if( parsed < min_value ) parsed = min_value;
+	if( parsed > max_value ) parsed = max_value;
+	return (int)parsed;
+}
+
+static int B003FunTimingEnabled()
+{
+	const char * timing = getenv( "MINICHLINK_TIMING" );
+	return timing && timing[0] && strcmp( timing, "0" );
+}
+
+static uint64_t B003FunTimingNowMS()
+{
+#if defined(WINDOWS) || defined(WIN32) || defined(_WIN32)
+	return GetTickCount();
+#else
+	struct timespec ts;
+	clock_gettime( CLOCK_MONOTONIC, &ts );
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)( ts.tv_nsec / 1000000 );
+#endif
+}
+
+static void B003FunTimingPrint( const char * name, uint64_t start_ms )
+{
+	if( B003FunTimingEnabled() )
+	{
+		printf( "timing_b003fast_%s_ms=%llu\n", name, (unsigned long long)( B003FunTimingNowMS() - start_ms ) );
+	}
+}
+
+static void B003FunTimingPrintCount( const char * name, uint32_t count )
+{
+	if( B003FunTimingEnabled() )
+	{
+		printf( "b003fast_%s=%u\n", name, count );
+	}
+}
 
 static const unsigned char byte_wise_read_blob[] = { // No alignment restrictions.
 	0x23, 0xa0, 0x05, 0x00, 0x13, 0x07, 0x45, 0x03, 0x0c, 0x43, 0x50, 0x43,
@@ -1214,11 +1264,99 @@ static int B003FunGetUUID(void * dev, uint8_t * buffer)
 	return ret;
 }
 
+static hid_device * B003FunOpenBootloaderSettled( uint32_t bootloader_id )
+{
+	uint64_t reenum_start_ms = B003FunTimingNowMS();
+	int settle_ms = B003FunEnvInt( "B003FUN_BOOTLOADER_SETTLE_MS", 50, 0, 1000 );
+	int poll_ms = B003FunEnvInt( "B003FUN_BOOTLOADER_POLL_MS", 10, 1, 1000 );
+	int timeout_ms = B003FunEnvInt( "B003FUN_BOOTLOADER_TIMEOUT_MS", 10000, 100, 30000 );
+	uint32_t attempts = 0;
+
+	B003FunTimingPrintCount( "bootloader_settle_ms", (uint32_t)settle_ms );
+	B003FunTimingPrintCount( "bootloader_poll_ms", (uint32_t)poll_ms );
+	B003FunTimingPrintCount( "bootloader_timeout_ms", (uint32_t)timeout_ms );
+	while( B003FunTimingNowMS() - reenum_start_ms < (uint64_t)timeout_ms )
+	{
+		attempts++;
+		hid_device * hd = hid_open( bootloader_id >> 16, bootloader_id & 0xffff, 0 );
+		if( hd )
+		{
+			if( settle_ms ) usleep( settle_ms * 1000 );
+			hid_close( hd );
+			hd = hid_open( bootloader_id >> 16, bootloader_id & 0xffff, 0 );
+			if( hd )
+			{
+				B003FunTimingPrintCount( "bootloader_reenum_attempts", attempts );
+				B003FunTimingPrint( "bootloader_reenum", reenum_start_ms );
+				return hd;
+			}
+		}
+		usleep( poll_ms * 1000 );
+	}
+	B003FunTimingPrintCount( "bootloader_reenum_attempts", attempts );
+	B003FunTimingPrint( "bootloader_reenum", reenum_start_ms );
+	return 0;
+}
+
+static hid_device * B003FunOpenUserVendorInterface( uint32_t * attempts_out, int poll_ms, int timeout_ms )
+{
+	hid_device * user_hd = 0;
+	uint32_t attempts = 0;
+	uint64_t scan_start_ms = B003FunTimingNowMS();
+	while( !user_hd && B003FunTimingNowMS() - scan_start_ms < (uint64_t)timeout_ms )
+	{
+		attempts++;
+		struct hid_device_info * devs = hid_enumerate( B003FUN_FAST_USER_VIDPID >> 16, B003FUN_FAST_USER_VIDPID & 0xffff );
+		struct hid_device_info * cur;
+		for( cur = devs; cur; cur = cur->next )
+		{
+			if( cur->usage_page == 0xff00 )
+			{
+				user_hd = hid_open_path( cur->path );
+				break;
+			}
+		}
+		hid_free_enumeration( devs );
+		if( !user_hd ) usleep( poll_ms * 1000 );
+	}
+	if( attempts_out ) *attempts_out = attempts;
+	return user_hd;
+}
+
+static hid_device * B003FunTryUserFeatureBootReset( uint32_t bootloader_id )
+{
+	uint32_t user_scan_attempts = 0;
+	uint64_t scan_start_ms = B003FunTimingNowMS();
+	int poll_ms = B003FunEnvInt( "B003FUN_USER_SCAN_POLL_MS", 50, 1, 1000 );
+	int timeout_ms = B003FunEnvInt( "B003FUN_USER_SCAN_TIMEOUT_MS", 5000, 100, 30000 );
+
+	B003FunTimingPrintCount( "user_scan_poll_ms", (uint32_t)poll_ms );
+	B003FunTimingPrintCount( "user_scan_timeout_ms", (uint32_t)timeout_ms );
+	hid_device * user_hd = B003FunOpenUserVendorInterface( &user_scan_attempts, poll_ms, timeout_ms );
+	B003FunTimingPrintCount( "user_scan_attempts", user_scan_attempts );
+	B003FunTimingPrint( "user_scan", scan_start_ms );
+	if( !user_hd ) return 0;
+
+	fprintf( stderr, "Trying to reboot user firmware into bootloader\n" );
+	uint8_t buffer[8] = { 0 };
+	uint64_t reset_feature_start_ms = B003FunTimingNowMS();
+	hid_get_feature_report( user_hd, buffer, sizeof( buffer ) );
+	B003FunTimingPrint( "user_reset_feature", reset_feature_start_ms );
+	hid_close( user_hd );
+
+	fprintf( stderr, "Waiting for bootloader HID re-enumeration\n" );
+	return B003FunOpenBootloaderSettled( bootloader_id );
+}
+
 void * TryInit_B003Fun(uint32_t id)
 {
 	hid_init();
 	fprintf( stderr, "VID:0x%04x, PID:0x%04x\n", id>>16, id&0xFFFF );
 	hid_device * hd = hid_open( id>>16, id&0xFFFF, 0); // third parameter is "serial"
+	if( !hd && id == B003FUN_FAST_TEST_VIDPID )
+	{
+		hd = B003FunTryUserFeatureBootReset( id );
+	}
 	if( !hd ) {
 		hd = hid_open(0x1209, 0xd003, 0);	//	Looking for default rv003usb device
 		if (!hd) {
