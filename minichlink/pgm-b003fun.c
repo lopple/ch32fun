@@ -774,6 +774,12 @@ static int B003FunSetupInterface( void * dev )
 	{
 		eps->no_eight_byte = 1;
 		eps->scratchpad_size = eps->fixed_report_size;
+		int max_payload_size = ( eps->fixed_report_size - 92 ) & ~63;
+		if( max_payload_size >= 64 )
+		{
+			eps->scratchpad_data_size = B003FunEnvInt( "B003FUN_FORCE_PAYLOAD_SIZE", max_payload_size, 64, max_payload_size );
+			eps->scratchpad_data_size &= ~63;
+		}
 	}
 	else
 	{
@@ -1189,7 +1195,7 @@ static int B003FunWriteBinaryBlob( void * dev, uint32_t address_to_write, uint32
 
 		B003FunErase(dev, new_address, new_blob_size, 0);
 		
-		if (eps->scratchpad_size > 348) {
+		if (eps->scratchpad_size > 348 || ( eps->fixed_report_size && eps->scratchpad_data_size > 64 )) {
 			ret = B003FunBlockWrite(dev, new_address, new_blob, new_blob_size);
 			if(ret) {
 				fprintf(stderr, "Error writing block at memory %08x / Error: %d\n", new_address, ret);
