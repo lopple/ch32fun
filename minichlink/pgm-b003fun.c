@@ -664,13 +664,16 @@ static int B003FunEnsureCrc32Loader( struct B003FunProgrammerStruct * eps )
 static int B003FunHashBinaryBlob( void * dev, uint32_t address_to_read_from, uint32_t read_size, uint32_t * crc32_out )
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct *)dev;
+	uint64_t crc_start_ms = B003FunTimingNowMS();
 
 	if( address_to_read_from < 0x01000000 )
 	{
 		address_to_read_from |= 0x08000000;
 	}
 
+	uint64_t loader_start_ms = B003FunTimingNowMS();
 	int r = B003FunEnsureCrc32Loader( eps );
+	B003FunTimingPrint( "crc_loader_upload", loader_start_ms );
 	if( r )
 	{
 		return r;
@@ -685,9 +688,12 @@ static int B003FunHashBinaryBlob( void * dev, uint32_t address_to_read_from, uin
 	if( MCF.PrepForLongOp ) MCF.PrepForLongOp( eps );
 	int send_len = B003FUN_CRC32_PARAM_OFFSET + 12 - eps->commandplace;
 	int receive_len = B003FUN_CRC32_RESULT_OFFSET + 4 - eps->commandplace;
+	uint64_t execute_start_ms = B003FunTimingNowMS();
 	if( CommitOp( eps, send_len, receive_len ) ) return -5;
+	B003FunTimingPrint( "crc_execute", execute_start_ms );
 
 	memcpy( crc32_out, &eps->respbuffer[B003FUN_CRC32_RESULT_OFFSET], 4 );
+	B003FunTimingPrint( "crc_total", crc_start_ms );
 	return 0;
 }
 static int InternalB003FunBoot( void * dev )
@@ -728,6 +734,7 @@ static int B003FunSetupInterface( void * dev )
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct*) dev;
 	struct InternalState * iss = (struct InternalState*)(((struct B003FunProgrammerStruct*)eps)->internal);
+	uint64_t setup_start_ms = B003FunTimingNowMS();
 	iss->target_chip = &ch32v003;
 
 	printf( "Halting Boot Countdown\n" );
@@ -768,6 +775,8 @@ static int B003FunSetupInterface( void * dev )
 		}
 	}
 	if( eps->scratchpad_size >= (128 + 1024) ) eps->scratchpad_data_size = eps->scratchpad_size - 128;
+	B003FunTimingPrintCount( "scratchpad_size", (uint32_t)eps->scratchpad_size );
+	B003FunTimingPrintCount( "scratchpad_data_size", (uint32_t)eps->scratchpad_data_size );
 
 	uint32_t one;
 	int two;
@@ -813,12 +822,13 @@ static int B003FunSetupInterface( void * dev )
 	uint8_t * part_type = (uint8_t*)&iss->target_chip_id;
 	uint8_t uuid[8];
 	fprintf( stderr, "Detected %s\n", iss->target_chip->name_str );
-	fprintf(stderr, "HID buffer: %d bytes\n", eps->scratchpad_size );	// Can remove this line in future versions
+	if( B003FunTimingEnabled() ) fprintf( stderr, "b003fast_hid_buffer=%d\n", eps->scratchpad_size );
 	fprintf( stderr, "Flash Storage: %d kB\n", iss->flash_size/1024 );
 	if( MCF.GetUUID( dev, uuid ) ) fprintf( stderr, "Couldn't read UUID\n" );
 	else fprintf( stderr, "Part UUID: %02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x\n", uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7] );
 	fprintf( stderr, "Part Type: %02x-%02x-%02x-%02x\n", part_type[3], part_type[2], part_type[1], part_type[0] );
 	fprintf( stderr, "Read protection: %s\n", (read_protection > 0)?"enabled":"disabled" );
+	B003FunTimingPrint( "setup", setup_start_ms );
 	return 0;
 }
 
@@ -950,6 +960,8 @@ static int B003FunBlockWrite( void * dev, uint32_t address_to_write, const uint8
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct*) dev;
 	struct InternalState * iss = eps->internal;
+	uint64_t write_start_ms = B003FunTimingNowMS();
+	uint32_t write_reports = 0;
 
 	if( IsAddressFlash( address_to_write ) )
 	{
@@ -973,12 +985,15 @@ static int B003FunBlockWrite( void * dev, uint32_t address_to_write, const uint8
 			memcpy( &eps->commandbuffer[eps->commandplace], data + data_pos, current_len ); // @84
 			if( MCF.PrepForLongOp ) MCF.PrepForLongOp( dev );  // Give the programmer a headsup this next operation could take a while.
 			if( CommitOp( eps, current_len, 0 ) ) return -5;
+			write_reports++;
 
 			left_to_write -= current_len;
 			data_pos += current_len;
 		}
 	}
 
+	B003FunTimingPrintCount( "block_write_reports", write_reports );
+	B003FunTimingPrint( "block_write", write_start_ms );
 	return 0;
 }
 
