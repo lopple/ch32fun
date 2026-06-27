@@ -43,6 +43,8 @@ struct B003FunProgrammerStruct
 	int crc32_loader_uploaded;
 };
 
+static hid_device * B003FunOpenUserVendorInterface( uint32_t * attempts_out, int poll_ms, int timeout_ms );
+
 static int B003FunEnvInt( const char * name, int default_value, int min_value, int max_value )
 {
 	const char * value = getenv( name );
@@ -54,6 +56,13 @@ static int B003FunEnvInt( const char * name, int default_value, int min_value, i
 	if( parsed < min_value ) parsed = min_value;
 	if( parsed > max_value ) parsed = max_value;
 	return (int)parsed;
+}
+
+static int B003FunEnvEnabledDefault( const char * name, int default_value )
+{
+	const char * value = getenv( name );
+	if( !value || !value[0] ) return default_value;
+	return strcmp( value, "0" );
 }
 
 static int B003FunTimingEnabled()
@@ -694,7 +703,24 @@ static int InternalB003FunBoot( void * dev )
 	// }
 	// printf( "\n" );
 	eps->no_get_report = 1;
-	if( CommitOp( eps, 0, 0 ) ) return -5;
+	int boot_result = CommitOp( eps, 0, 0 );
+	if( boot_result < 0 ) return -5;
+	if( B003FunEnvEnabledDefault( "B003FUN_WAIT_USER_AFTER_BOOT", 1 ) )
+	{
+		int poll_ms = B003FunEnvInt( "B003FUN_USER_SCAN_POLL_MS", 50, 1, 1000 );
+		int timeout_ms = B003FunEnvInt( "B003FUN_USER_SCAN_TIMEOUT_MS", 5000, 100, 30000 );
+		uint32_t attempts = 0;
+		uint64_t wait_start_ms = B003FunTimingNowMS();
+		B003FunTimingPrintCount( "boot_user_wait_poll_ms", (uint32_t)poll_ms );
+		B003FunTimingPrintCount( "boot_user_wait_timeout_ms", (uint32_t)timeout_ms );
+		hid_close( eps->hd );
+		eps->hd = 0;
+		hid_device * user_hd = B003FunOpenUserVendorInterface( &attempts, poll_ms, timeout_ms );
+		B003FunTimingPrintCount( "boot_user_wait_attempts", attempts );
+		B003FunTimingPrint( "boot_user_wait", wait_start_ms );
+		if( !user_hd ) return -6;
+		hid_close( user_hd );
+	}
 	return 0;
 }
 
@@ -1175,8 +1201,7 @@ static int B003FunHaltMode( void * dev, int mode )
 		break;
 
 	case HALT_MODE_REBOOT:            // Actually boot?
-		InternalB003FunBoot( dev );
-		break;
+		return InternalB003FunBoot( dev );
 
 	case HALT_MODE_RESUME:
 		fprintf( stderr, "Warning: this programmer cannot resume\n" );
