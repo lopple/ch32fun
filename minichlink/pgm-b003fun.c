@@ -11,14 +11,18 @@
 
 #if defined(WINDOWS) || defined(WIN32) || defined(_WIN32)
 void Sleep(uint32_t dwMilliseconds);
+uint32_t GetTickCount(void);
 #define usleep( x ) Sleep( x / 1000 )
 #define sleep( x ) Sleep( x * 1000 )
 #else
+#include <time.h>
 #include <unistd.h>
 #endif
 
 #define MAX_USB_ERR 10000
 #define TERMINAL_FEATURE_ID 0xFD
+#define B003FUN_FAST_TEST_VIDPID 0x1209000a
+#define B003FUN_FAST_USER_VIDPID 0x1209c003
 #define B003FUN_CRC32_LOADER_ADDR 0x20000500
 #define B003FUN_CRC32_PARAM_OFFSET 32
 #define B003FUN_CRC32_RESULT_OFFSET 56
@@ -36,8 +40,75 @@ struct B003FunProgrammerStruct
 	int scratchpad_size;
 	int scratchpad_data_size;
 	int no_eight_byte;
+	int fixed_report_size;
 	int crc32_loader_uploaded;
+	int send_retry_delay_us;
 };
+
+static hid_device * B003FunOpenUserVendorInterface( uint32_t * attempts_out, int poll_ms, int timeout_ms );
+
+static int B003FunEnvInt( const char * name, int default_value, int min_value, int max_value )
+{
+	const char * value = getenv( name );
+	if( !value || !value[0] ) return default_value;
+
+	char * endptr = 0;
+	long parsed = strtol( value, &endptr, 0 );
+	if( endptr == value ) return default_value;
+	if( parsed < min_value ) parsed = min_value;
+	if( parsed > max_value ) parsed = max_value;
+	return (int)parsed;
+}
+
+static int B003FunEnvEnabledDefault( const char * name, int default_value )
+{
+	const char * value = getenv( name );
+	if( !value || !value[0] ) return default_value;
+	return strcmp( value, "0" );
+}
+
+static int B003FunTimingEnabled()
+{
+	const char * timing = getenv( "MINICHLINK_TIMING" );
+	return timing && timing[0] && strcmp( timing, "0" );
+}
+
+static uint64_t B003FunTimingNowMS()
+{
+#if defined(WINDOWS) || defined(WIN32) || defined(_WIN32)
+	return GetTickCount();
+#else
+	struct timespec ts;
+	clock_gettime( CLOCK_MONOTONIC, &ts );
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)( ts.tv_nsec / 1000000 );
+#endif
+}
+
+static void B003FunTimingPrint( const char * name, uint64_t start_ms )
+{
+	if( B003FunTimingEnabled() )
+	{
+		printf( "timing_b003fast_%s_ms=%llu\n", name, (unsigned long long)( B003FunTimingNowMS() - start_ms ) );
+	}
+}
+
+static void B003FunTimingPrintCount( const char * name, uint32_t count )
+{
+	if( B003FunTimingEnabled() )
+	{
+		printf( "b003fast_%s=%u\n", name, count );
+	}
+}
+
+static void B003FunRetryDelayUS( int us )
+{
+	if( us <= 0 ) return;
+#if defined(WINDOWS) || defined(WIN32) || defined(_WIN32)
+	Sleep( (uint32_t)( ( us + 999 ) / 1000 ) );
+#else
+	usleep( us );
+#endif
+}
 
 static const unsigned char byte_wise_read_blob[] = { // No alignment restrictions.
 	0x23, 0xa0, 0x05, 0x00, 0x13, 0x07, 0x45, 0x03, 0x0c, 0x43, 0x50, 0x43,
@@ -242,7 +313,18 @@ static int CommitOp( struct B003FunProgrammerStruct * eps, int send_data_len, in
 	uint8_t feature_id = 0xaa;
 	uint32_t magic_go = 0x1234abcd;
 	uint32_t pad_size = eps->commandplace + send_data_len + 4;
-	if ( pad_size <= eps->scratchpad_size )
+	if( eps->fixed_report_size )
+	{
+		if( pad_size > (uint32_t)eps->fixed_report_size )
+		{
+			fprintf(stderr, "Error! Command buffer is bigger than fixed report size\n");
+			return -10;
+		}
+		pad_size = (uint32_t)eps->fixed_report_size;
+		memcpy( eps->commandbuffer + pad_size - 4, &magic_go, 4 );
+		eps->commandbuffer[0] = feature_id;
+	}
+	else if ( pad_size <= eps->scratchpad_size )
 	{
 		if( pad_size > 5248 ) pad_size = 6272;
 		else if( pad_size > 4096 ) pad_size = 5248;
@@ -290,7 +372,7 @@ resend:
 		}
 		else
 		{
-			MCF.DelayUS( eps, pad_size*10 );
+			B003FunRetryDelayUS( eps->send_retry_delay_us );
 			goto resend;
 		}
 	}
@@ -320,7 +402,12 @@ resend:
 		max_timeout = 200;
 	}
 
-	if( receive_data_len ) {
+	if( eps->fixed_report_size )
+	{
+		pad_size = (uint32_t)eps->fixed_report_size;
+		feature_id = 0xaa;
+	}
+	else if( receive_data_len ) {
 		pad_size = receive_data_len + eps->commandplace + 4;
 
 		if( pad_size <= eps->scratchpad_size )
@@ -605,13 +692,16 @@ static int B003FunEnsureCrc32Loader( struct B003FunProgrammerStruct * eps )
 static int B003FunHashBinaryBlob( void * dev, uint32_t address_to_read_from, uint32_t read_size, uint32_t * crc32_out )
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct *)dev;
+	uint64_t crc_start_ms = B003FunTimingNowMS();
 
 	if( address_to_read_from < 0x01000000 )
 	{
 		address_to_read_from |= 0x08000000;
 	}
 
+	uint64_t loader_start_ms = B003FunTimingNowMS();
 	int r = B003FunEnsureCrc32Loader( eps );
+	B003FunTimingPrint( "crc_loader_upload", loader_start_ms );
 	if( r )
 	{
 		return r;
@@ -626,14 +716,24 @@ static int B003FunHashBinaryBlob( void * dev, uint32_t address_to_read_from, uin
 	if( MCF.PrepForLongOp ) MCF.PrepForLongOp( eps );
 	int send_len = B003FUN_CRC32_PARAM_OFFSET + 12 - eps->commandplace;
 	int receive_len = B003FUN_CRC32_RESULT_OFFSET + 4 - eps->commandplace;
+	uint64_t execute_start_ms = B003FunTimingNowMS();
 	if( CommitOp( eps, send_len, receive_len ) ) return -5;
+	B003FunTimingPrint( "crc_execute", execute_start_ms );
 
 	memcpy( crc32_out, &eps->respbuffer[B003FUN_CRC32_RESULT_OFFSET], 4 );
+	B003FunTimingPrint( "crc_total", crc_start_ms );
 	return 0;
 }
 static int InternalB003FunBoot( void * dev )
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct*) dev;
+
+	if( eps->fixed_report_size && MCF.WriteWord )
+	{
+		if( MCF.WriteWord( dev, 0x40022028, 0x45670123 ) ) return -5;
+		if( MCF.WriteWord( dev, 0x40022028, 0xCDEF89AB ) ) return -5;
+		if( MCF.WriteWord( dev, 0x4002200c, 0 ) ) return -5;
+	}
 
 	printf( "Booting\n" );
 	ResetOp( eps );
@@ -644,7 +744,31 @@ static int InternalB003FunBoot( void * dev )
 	// }
 	// printf( "\n" );
 	eps->no_get_report = 1;
-	if( CommitOp( eps, 0, 0 ) ) return -5;
+	int boot_result = CommitOp( eps, 0, 0 );
+	if( boot_result < 0 ) return -5;
+
+	int settle_ms = B003FunEnvInt( "B003FUN_BOOT_SETTLE_MS", 500, 0, 30000 );
+	int wait_user_after_boot = B003FunEnvEnabledDefault( "B003FUN_WAIT_USER_AFTER_BOOT", 0 );
+	B003FunTimingPrintCount( "boot_settle_ms", (uint32_t)settle_ms );
+	B003FunTimingPrintCount( "boot_user_wait_enabled", (uint32_t)wait_user_after_boot );
+	hid_close( eps->hd );
+	eps->hd = 0;
+	if( settle_ms > 0 ) usleep( settle_ms * 1000 );
+
+	if( wait_user_after_boot )
+	{
+		int poll_ms = B003FunEnvInt( "B003FUN_USER_SCAN_POLL_MS", 50, 1, 1000 );
+		int timeout_ms = B003FunEnvInt( "B003FUN_USER_SCAN_TIMEOUT_MS", 15000, 100, 30000 );
+		uint32_t attempts = 0;
+		uint64_t wait_start_ms = B003FunTimingNowMS();
+		B003FunTimingPrintCount( "boot_user_wait_poll_ms", (uint32_t)poll_ms );
+		B003FunTimingPrintCount( "boot_user_wait_timeout_ms", (uint32_t)timeout_ms );
+		hid_device * user_hd = B003FunOpenUserVendorInterface( &attempts, poll_ms, timeout_ms );
+		B003FunTimingPrintCount( "boot_user_wait_attempts", attempts );
+		B003FunTimingPrint( "boot_user_wait", wait_start_ms );
+		if( !user_hd ) return -6;
+		hid_close( user_hd );
+	}
 	return 0;
 }
 
@@ -652,6 +776,7 @@ static int B003FunSetupInterface( void * dev )
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct*) dev;
 	struct InternalState * iss = (struct InternalState*)(((struct B003FunProgrammerStruct*)eps)->internal);
+	uint64_t setup_start_ms = B003FunTimingNowMS();
 	iss->target_chip = &ch32v003;
 
 	printf( "Halting Boot Countdown\n" );
@@ -659,39 +784,55 @@ static int B003FunSetupInterface( void * dev )
 	WriteOpArb( eps, halt_wait_blob, sizeof(halt_wait_blob) );
 	if( CommitOp( eps, 0, 0 ) ) return -5;
 
-	// Check for minimum 8 byte feature
-	eps->respbuffer[0] = 0xa8;
-	int r = hid_get_feature_report( eps->hd, eps->respbuffer, 8 );
-	if( r != 8 ) eps->no_eight_byte = 1;
-	else eps->no_eight_byte = 0;
-	// Check for the maximum buffer size available
-	eps->respbuffer[0] = 0xad;
-	// 4096 is the maximum size for windows and mac
-	r = hid_get_feature_report( eps->hd, eps->respbuffer, 4096 );
-	if( r >= 0 ) // If not on Windows, or guessed the first time
+	if( eps->fixed_report_size )
 	{
-		eps->scratchpad_size = r;
-		// Check once more, if we can go higher
-		// On windows and mac it will fail, on linux we will get an actual maximum HID report size
-		eps->respbuffer[0] = 0xb0;
-		r = hid_get_feature_report( eps->hd, eps->respbuffer, 6144+128 );
-		if( r > eps->scratchpad_size ) eps->scratchpad_size = r;
+		eps->no_eight_byte = 1;
+		eps->scratchpad_size = eps->fixed_report_size;
+		int max_payload_size = ( eps->fixed_report_size - 92 ) & ~63;
+		if( max_payload_size >= 64 )
+		{
+			eps->scratchpad_data_size = B003FunEnvInt( "B003FUN_FORCE_PAYLOAD_SIZE", max_payload_size, 64, max_payload_size );
+			eps->scratchpad_data_size &= ~63;
+		}
 	}
 	else
 	{
-		for( int i = 0xac; i > 0xaa; i-- )
+		// Check for minimum 8 byte feature
+		eps->respbuffer[0] = 0xa8;
+		int r = hid_get_feature_report( eps->hd, eps->respbuffer, 8 );
+		if( r != 8 ) eps->no_eight_byte = 1;
+		else eps->no_eight_byte = 0;
+		// Check for the maximum buffer size available
+		eps->respbuffer[0] = 0xad;
+		// 4096 is the maximum size for windows and mac
+		r = hid_get_feature_report( eps->hd, eps->respbuffer, 4096 );
+		if( r >= 0 ) // If not on Windows, or guessed the first time
 		{
-			int id_size = 5120 - (1024*(0xaf - i)) + 128;
-			eps->respbuffer[0] = i;
-			r = hid_get_feature_report( eps->hd, eps->respbuffer, id_size );
-			if( r == id_size )
+			eps->scratchpad_size = r;
+			// Check once more, if we can go higher
+			// On windows and mac it will fail, on linux we will get an actual maximum HID report size
+			eps->respbuffer[0] = 0xb0;
+			r = hid_get_feature_report( eps->hd, eps->respbuffer, 6144+128 );
+			if( r > eps->scratchpad_size ) eps->scratchpad_size = r;
+		}
+		else
+		{
+			for( int i = 0xac; i > 0xaa; i-- )
 			{
-				eps->scratchpad_size = id_size;
-				break;
+				int id_size = 5120 - (1024*(0xaf - i)) + 128;
+				eps->respbuffer[0] = i;
+				r = hid_get_feature_report( eps->hd, eps->respbuffer, id_size );
+				if( r == id_size )
+				{
+					eps->scratchpad_size = id_size;
+					break;
+				}
 			}
 		}
 	}
 	if( eps->scratchpad_size >= (128 + 1024) ) eps->scratchpad_data_size = eps->scratchpad_size - 128;
+	B003FunTimingPrintCount( "scratchpad_size", (uint32_t)eps->scratchpad_size );
+	B003FunTimingPrintCount( "scratchpad_data_size", (uint32_t)eps->scratchpad_data_size );
 
 	uint32_t one;
 	int two;
@@ -737,12 +878,13 @@ static int B003FunSetupInterface( void * dev )
 	uint8_t * part_type = (uint8_t*)&iss->target_chip_id;
 	uint8_t uuid[8];
 	fprintf( stderr, "Detected %s\n", iss->target_chip->name_str );
-	fprintf(stderr, "HID buffer: %d bytes\n", eps->scratchpad_size );	// Can remove this line in future versions
+	if( B003FunTimingEnabled() ) fprintf( stderr, "b003fast_hid_buffer=%d\n", eps->scratchpad_size );
 	fprintf( stderr, "Flash Storage: %d kB\n", iss->flash_size/1024 );
 	if( MCF.GetUUID( dev, uuid ) ) fprintf( stderr, "Couldn't read UUID\n" );
 	else fprintf( stderr, "Part UUID: %02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x\n", uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7] );
 	fprintf( stderr, "Part Type: %02x-%02x-%02x-%02x\n", part_type[3], part_type[2], part_type[1], part_type[0] );
 	fprintf( stderr, "Read protection: %s\n", (read_protection > 0)?"enabled":"disabled" );
+	B003FunTimingPrint( "setup", setup_start_ms );
 	return 0;
 }
 
@@ -874,6 +1016,8 @@ static int B003FunBlockWrite( void * dev, uint32_t address_to_write, const uint8
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct*) dev;
 	struct InternalState * iss = eps->internal;
+	uint64_t write_start_ms = B003FunTimingNowMS();
+	uint32_t write_reports = 0;
 
 	if( IsAddressFlash( address_to_write ) )
 	{
@@ -897,12 +1041,15 @@ static int B003FunBlockWrite( void * dev, uint32_t address_to_write, const uint8
 			memcpy( &eps->commandbuffer[eps->commandplace], data + data_pos, current_len ); // @84
 			if( MCF.PrepForLongOp ) MCF.PrepForLongOp( dev );  // Give the programmer a headsup this next operation could take a while.
 			if( CommitOp( eps, current_len, 0 ) ) return -5;
+			write_reports++;
 
 			left_to_write -= current_len;
 			data_pos += current_len;
 		}
 	}
 
+	B003FunTimingPrintCount( "block_write_reports", write_reports );
+	B003FunTimingPrint( "block_write", write_start_ms );
 	return 0;
 }
 
@@ -1062,7 +1209,7 @@ static int B003FunWriteBinaryBlob( void * dev, uint32_t address_to_write, uint32
 
 		B003FunErase(dev, new_address, new_blob_size, 0);
 		
-		if (eps->scratchpad_size > 348) {
+		if (eps->scratchpad_size > 348 || ( eps->fixed_report_size && eps->scratchpad_data_size > 64 )) {
 			ret = B003FunBlockWrite(dev, new_address, new_blob, new_blob_size);
 			if(ret) {
 				fprintf(stderr, "Error writing block at memory %08x / Error: %d\n", new_address, ret);
@@ -1125,8 +1272,7 @@ static int B003FunHaltMode( void * dev, int mode )
 		break;
 
 	case HALT_MODE_REBOOT:            // Actually boot?
-		InternalB003FunBoot( dev );
-		break;
+		return InternalB003FunBoot( dev );
 
 	case HALT_MODE_RESUME:
 		fprintf( stderr, "Warning: this programmer cannot resume\n" );
@@ -1214,11 +1360,99 @@ static int B003FunGetUUID(void * dev, uint8_t * buffer)
 	return ret;
 }
 
+static hid_device * B003FunOpenBootloaderSettled( uint32_t bootloader_id )
+{
+	uint64_t reenum_start_ms = B003FunTimingNowMS();
+	int settle_ms = B003FunEnvInt( "B003FUN_BOOTLOADER_SETTLE_MS", 50, 0, 1000 );
+	int poll_ms = B003FunEnvInt( "B003FUN_BOOTLOADER_POLL_MS", 10, 1, 1000 );
+	int timeout_ms = B003FunEnvInt( "B003FUN_BOOTLOADER_TIMEOUT_MS", 10000, 100, 30000 );
+	uint32_t attempts = 0;
+
+	B003FunTimingPrintCount( "bootloader_settle_ms", (uint32_t)settle_ms );
+	B003FunTimingPrintCount( "bootloader_poll_ms", (uint32_t)poll_ms );
+	B003FunTimingPrintCount( "bootloader_timeout_ms", (uint32_t)timeout_ms );
+	while( B003FunTimingNowMS() - reenum_start_ms < (uint64_t)timeout_ms )
+	{
+		attempts++;
+		hid_device * hd = hid_open( bootloader_id >> 16, bootloader_id & 0xffff, 0 );
+		if( hd )
+		{
+			if( settle_ms ) usleep( settle_ms * 1000 );
+			hid_close( hd );
+			hd = hid_open( bootloader_id >> 16, bootloader_id & 0xffff, 0 );
+			if( hd )
+			{
+				B003FunTimingPrintCount( "bootloader_reenum_attempts", attempts );
+				B003FunTimingPrint( "bootloader_reenum", reenum_start_ms );
+				return hd;
+			}
+		}
+		usleep( poll_ms * 1000 );
+	}
+	B003FunTimingPrintCount( "bootloader_reenum_attempts", attempts );
+	B003FunTimingPrint( "bootloader_reenum", reenum_start_ms );
+	return 0;
+}
+
+static hid_device * B003FunOpenUserVendorInterface( uint32_t * attempts_out, int poll_ms, int timeout_ms )
+{
+	hid_device * user_hd = 0;
+	uint32_t attempts = 0;
+	uint64_t scan_start_ms = B003FunTimingNowMS();
+	while( !user_hd && B003FunTimingNowMS() - scan_start_ms < (uint64_t)timeout_ms )
+	{
+		attempts++;
+		struct hid_device_info * devs = hid_enumerate( B003FUN_FAST_USER_VIDPID >> 16, B003FUN_FAST_USER_VIDPID & 0xffff );
+		struct hid_device_info * cur;
+		for( cur = devs; cur; cur = cur->next )
+		{
+			if( cur->usage_page == 0xff00 )
+			{
+				user_hd = hid_open_path( cur->path );
+				break;
+			}
+		}
+		hid_free_enumeration( devs );
+		if( !user_hd ) usleep( poll_ms * 1000 );
+	}
+	if( attempts_out ) *attempts_out = attempts;
+	return user_hd;
+}
+
+static hid_device * B003FunTryUserFeatureBootReset( uint32_t bootloader_id )
+{
+	uint32_t user_scan_attempts = 0;
+	uint64_t scan_start_ms = B003FunTimingNowMS();
+	int poll_ms = B003FunEnvInt( "B003FUN_USER_SCAN_POLL_MS", 50, 1, 1000 );
+	int timeout_ms = B003FunEnvInt( "B003FUN_USER_SCAN_TIMEOUT_MS", 5000, 100, 30000 );
+
+	B003FunTimingPrintCount( "user_scan_poll_ms", (uint32_t)poll_ms );
+	B003FunTimingPrintCount( "user_scan_timeout_ms", (uint32_t)timeout_ms );
+	hid_device * user_hd = B003FunOpenUserVendorInterface( &user_scan_attempts, poll_ms, timeout_ms );
+	B003FunTimingPrintCount( "user_scan_attempts", user_scan_attempts );
+	B003FunTimingPrint( "user_scan", scan_start_ms );
+	if( !user_hd ) return 0;
+
+	fprintf( stderr, "Trying to reboot user firmware into bootloader\n" );
+	uint8_t buffer[8] = { 0 };
+	uint64_t reset_feature_start_ms = B003FunTimingNowMS();
+	hid_get_feature_report( user_hd, buffer, sizeof( buffer ) );
+	B003FunTimingPrint( "user_reset_feature", reset_feature_start_ms );
+	hid_close( user_hd );
+
+	fprintf( stderr, "Waiting for bootloader HID re-enumeration\n" );
+	return B003FunOpenBootloaderSettled( bootloader_id );
+}
+
 void * TryInit_B003Fun(uint32_t id)
 {
 	hid_init();
 	fprintf( stderr, "VID:0x%04x, PID:0x%04x\n", id>>16, id&0xFFFF );
 	hid_device * hd = hid_open( id>>16, id&0xFFFF, 0); // third parameter is "serial"
+	if( !hd && id == B003FUN_FAST_TEST_VIDPID )
+	{
+		hd = B003FunTryUserFeatureBootReset( id );
+	}
 	if( !hd ) {
 		hd = hid_open(0x1209, 0xd003, 0);	//	Looking for default rv003usb device
 		if (!hd) {
@@ -1253,6 +1487,13 @@ void * TryInit_B003Fun(uint32_t id)
 	eps->scratchpad_size = 128;
 	eps->scratchpad_data_size = 64;
 	eps->no_eight_byte = 1;
+	if( id == B003FUN_FAST_TEST_VIDPID )
+	{
+		eps->fixed_report_size = B003FunEnvInt( "B003FUN_FORCE_REPORT_SIZE", 340, 0, 8196 );
+	}
+	eps->send_retry_delay_us = B003FunEnvInt( "B003FUN_SEND_RETRY_DELAY_US", 2000, 0, 50000 );
+	B003FunTimingPrintCount( "fixed_report_size", (uint32_t)eps->fixed_report_size );
+	B003FunTimingPrintCount( "send_retry_delay_us", (uint32_t)eps->send_retry_delay_us );
 	memset( &MCF, 0, sizeof( MCF ) );
 	MCF.WriteReg32 = 0;
 	MCF.ReadReg32 = 0;
