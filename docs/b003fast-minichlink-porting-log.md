@@ -22,12 +22,12 @@ the bootloader firmware stays unchanged; this pass only changes host-side
 |---|---|---|---|---|---|
 | Included | `7b90cc9` | `b003fast-test` programmer alias | Already in `lopple/rebuild-on-cnlohr` | Needed for pid.codes test PID `1209:000a`. | Build smoke only before this stability pass. |
 | Included | `b88e3a0`, `ddcb03e` | Target-side CRC32 hash and `-V` write verify | Already in `lopple/rebuild-on-cnlohr` | Required for short post-write verification without full readback. | Build smoke only before this stability pass. |
-| Included | `931584e`, `e18b5b8` | USER firmware feature reset into b003fast bootloader | `77f8591` | Required to make user-to-bootloader transitions usable without a manual reset. | Windows host build smoke passed; hardware check pending. |
-| Included | `b404ee8`, `e18b5b8` | Bootloader re-enumeration and USER scan timing | `77f8591` | Stabilizes HID open after reset and after `-b`. | Windows host build smoke passed; hardware check pending. |
-| Included | `940b532` | Default USER wait after `-b` | `5736525` | Prevents stale HID when the next write starts too soon after booting user firmware. | Windows host build smoke passed; target: 20/20 `write+CRC -> -b`. |
-| Included | `6ff1bb1`, `0a6da09`, `ca323d7` | Timing diagnostics gated by `MINICHLINK_TIMING` | `6ed554b` | Keeps logs quiet by default while preserving measurement detail. | Windows host build smoke passed; hardware timing output pending. |
-| Included | `156fe21`, `7b60fcc`, `00382f6` | HID send retry delay tuning | `d587ecf` | Previous hardware runs were stable with a short retry delay. | Windows host build smoke passed; repeated write check pending. |
-| Included | `dd06eca` | Fixed 340-byte b003fast-test reports | `ae647f5` | The existing unchanged bootloader does not pass upstream scratchpad autodetection reliably, so only `b003fast-test` keeps the old fixed report size. The general upstream large-report path remains unchanged for other programmers. | Windows host build passed; `minichlink -C b003fast-test -i` reached chip info with `b003fast_scratchpad_size=340`. |
+| Included | `931584e`, `e18b5b8` | USER firmware feature reset into b003fast bootloader | `77f8591` | Required to make user-to-bootloader transitions usable without a manual reset. | [Stability report](b003fast-minichlink-stability-report.md) passed repeated USER-to-BL resets during 20-cycle write+CRC runs. |
+| Included | `b404ee8`, `e18b5b8` | Bootloader re-enumeration and USER scan timing | `77f8591`, `e23fb95` | Stabilizes HID open after reset and after `-b`; `-b` now forces USER start mode before booting user firmware. | [Stability report](b003fast-minichlink-stability-report.md) passed 20/20 with the new default wait. |
+| Included | `940b532` | Default USER wait after `-b` | `5736525`, `37b872f` | Prevents stale HID when the next write starts too soon after booting user firmware. The default USER wait after `-b` is now 15 s and remains adjustable with `B003FUN_USER_SCAN_TIMEOUT_MS`. | [20-cycle default run](b003fast-minichlink-stability-report.md) passed. |
+| Included | `6ff1bb1`, `0a6da09`, `ca323d7` | Timing diagnostics gated by `MINICHLINK_TIMING` | `6ed554b` | Keeps logs quiet by default while preserving measurement detail. | Hardware timing output captured in the stability report. |
+| Included | `156fe21`, `7b60fcc`, `00382f6` | HID send retry delay tuning | `d587ecf` | Previous hardware runs were stable with a short retry delay. | [Stability report](b003fast-minichlink-stability-report.md) passed 20/20 write+CRC with default retry delay. |
+| Included | `dd06eca` | Fixed 340-byte b003fast-test reports and block writes | `ae647f5`, `b2e53c1` | The existing unchanged bootloader does not pass upstream scratchpad autodetection reliably, so only `b003fast-test` keeps the old fixed report size. The general upstream large-report path remains unchanged for other programmers. 192-byte block writes avoid the slow 64-byte fallback. | [Stability report](b003fast-minichlink-stability-report.md): `-i` passed and 9120-byte write+CRC is about `10.7 s`. |
 | Deferred | `06dd931`, `e4bb916`, `43d8fe3`, `5e91f71`, `f5ea3f7`, `16c5e5e`, `69074f1` | RAM/vector write, RAM flasher, W128/W192 fast write | Not ported in this pass | Speed work is separated from the first stability release. Current upstream already has large-report support, so this needs fresh measurement. | Future experiment branch. |
 | Deferred | `23edc3a` | Larger readback chunk | Not ported in this pass | Useful for readback speed, but not required for the stability release. | Future measurement. |
 | Deferred | `29e426a` | GET omission experiment | Not ported in this pass | Related to fast-write protocol tuning; keep out of initial stability pass. | Future experiment branch. |
@@ -46,7 +46,7 @@ Before cutting a personal test release from this branch:
 - `minichlink -C b003fast-test -H flash 9120` returns a target-side CRC32.
 - `minichlink -C b003fast-test -V -w <user image> flash` writes and verifies.
 - `minichlink -C b003fast-test -b` waits for USER HID by default.
-- `write+CRC -> -b` passes 20 consecutive cycles without stale HID.
+- `write+CRC -> -b` passes 20 consecutive cycles without stale HID. Completed on 2026-06-27 with the new 15 s default USER boot wait; see [stability report](b003fast-minichlink-stability-report.md).
 
 ## Not In Scope For This Stability Pass
 
