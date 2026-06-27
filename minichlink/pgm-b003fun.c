@@ -728,6 +728,13 @@ static int InternalB003FunBoot( void * dev )
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct*) dev;
 
+	if( eps->fixed_report_size && MCF.WriteWord )
+	{
+		if( MCF.WriteWord( dev, 0x40022028, 0x45670123 ) ) return -5;
+		if( MCF.WriteWord( dev, 0x40022028, 0xCDEF89AB ) ) return -5;
+		if( MCF.WriteWord( dev, 0x4002200c, 0 ) ) return -5;
+	}
+
 	printf( "Booting\n" );
 	ResetOp( eps );
 	WriteOpArb( eps, run_app_blob, sizeof(run_app_blob) );
