@@ -37,10 +37,6 @@ static void readCSR( void * dev, uint32_t csr );
 static int DefaultRebootIntoBootloader( void * dev );
 struct MiniChlinkFunctions MCF;
 
-#define B003BOOT_LEGACY_VIDPID 0x1209b003
-#define B803BOOT_LEGACY_VIDPID 0x1209b803
-#define B003FAST_TEST_VIDPID   0x1209000a
-
 static uint32_t HostCRC32( const uint8_t * data, uint32_t length )
 {
 	uint32_t crc = 0xffffffffu;
@@ -54,7 +50,13 @@ static uint32_t HostCRC32( const uint8_t * data, uint32_t length )
 		}
 	}
 	return crc ^ 0xffffffffu;
-}void * MiniCHLinkInitAsDLL( struct MiniChlinkFunctions ** MCFO, const init_hints_t* init_hints )
+}
+
+#define B003BOOT_LEGACY_VIDPID 0x1209b003
+#define B803BOOT_LEGACY_VIDPID 0x1209b803
+#define B003FAST_TEST_VIDPID   0x1209000a
+
+void * MiniCHLinkInitAsDLL( struct MiniChlinkFunctions ** MCFO, const init_hints_t* init_hints )
 {
 	void * dev = 0;
 	
