@@ -41,6 +41,7 @@ struct B003FunProgrammerStruct
 	int scratchpad_data_size;
 	int no_eight_byte;
 	int crc32_loader_uploaded;
+	int send_retry_delay_us;
 };
 
 static hid_device * B003FunOpenUserVendorInterface( uint32_t * attempts_out, int poll_ms, int timeout_ms );
@@ -96,6 +97,16 @@ static void B003FunTimingPrintCount( const char * name, uint32_t count )
 	{
 		printf( "b003fast_%s=%u\n", name, count );
 	}
+}
+
+static void B003FunRetryDelayUS( int us )
+{
+	if( us <= 0 ) return;
+#if defined(WINDOWS) || defined(WIN32) || defined(_WIN32)
+	Sleep( (uint32_t)( ( us + 999 ) / 1000 ) );
+#else
+	usleep( us );
+#endif
 }
 
 static const unsigned char byte_wise_read_blob[] = { // No alignment restrictions.
@@ -349,7 +360,7 @@ resend:
 		}
 		else
 		{
-			MCF.DelayUS( eps, pad_size*10 );
+			B003FunRetryDelayUS( eps->send_retry_delay_us );
 			goto resend;
 		}
 	}
@@ -1431,6 +1442,8 @@ void * TryInit_B003Fun(uint32_t id)
 	eps->scratchpad_size = 128;
 	eps->scratchpad_data_size = 64;
 	eps->no_eight_byte = 1;
+	eps->send_retry_delay_us = B003FunEnvInt( "B003FUN_SEND_RETRY_DELAY_US", 2000, 0, 50000 );
+	B003FunTimingPrintCount( "send_retry_delay_us", (uint32_t)eps->send_retry_delay_us );
 	memset( &MCF, 0, sizeof( MCF ) );
 	MCF.WriteReg32 = 0;
 	MCF.ReadReg32 = 0;
