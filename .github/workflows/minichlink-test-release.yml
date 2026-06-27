@@ -1,0 +1,153 @@
+name: Build minichlink test release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create when create_release is true
+        required: true
+        default: b003fast-test
+      create_release:
+        description: Create or update a GitHub prerelease with the built assets
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  linux-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -yqq purge man-db || true
+          sudo apt-get install -y --no-install-recommends \
+            build-essential make libusb-1.0-0-dev libudev-dev \
+            mingw-w64-x86-64-dev gcc-mingw-w64-x86-64 zip
+
+      - name: Build Linux minichlink
+        run: |
+          cd minichlink
+          make clean
+          make -j$(nproc) minichlink minichlink.so
+
+      - name: Build Windows minichlink
+        run: |
+          cd minichlink
+          OS=Windows_NT make clean
+          OS=Windows_NT make -j$(nproc) minichlink.exe
+
+      - name: Package Linux and Windows assets
+        run: |
+          mkdir -p dist/linux-x86_64 dist/windows-x86_64
+          cp minichlink/minichlink minichlink/minichlink.so \
+            minichlink/99-minichlink.rules minichlink/99-minichlink-uiap.rules \
+            dist/linux-x86_64/
+          cp minichlink/minichlink.exe dist/windows-x86_64/
+          tar czf dist/minichlink-b003fast-linux-x86_64.tar.gz -C dist/linux-x86_64 .
+          (cd dist/windows-x86_64 && zip -9 ../minichlink-b003fast-windows-x86_64.zip minichlink.exe)
+          (cd dist && sha256sum minichlink-b003fast-linux-x86_64.tar.gz minichlink-b003fast-windows-x86_64.zip > SHA256SUMS-linux-windows.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minichlink-linux-windows-test-release
+          path: |
+            dist/minichlink-b003fast-linux-x86_64.tar.gz
+            dist/minichlink-b003fast-windows-x86_64.zip
+            dist/SHA256SUMS-linux-windows.txt
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install macOS dependencies
+        run: |
+          brew update
+          brew install automake autoconf libtool
+
+      - name: Build static libusb for macOS ARM64 and x86_64
+        run: |
+          git clone --branch v1.0.29 --depth 1 https://github.com/libusb/libusb.git
+          cd libusb
+          mkdir build-arm64 && cd build-arm64
+          ../autogen.sh CFLAGS="-arch arm64" LDFLAGS="-arch arm64" --disable-shared --enable-static
+          make -C libusb -j$(sysctl -n hw.logicalcpu)
+          cd ..
+          mkdir build-x86_64 && cd build-x86_64
+          ../autogen.sh CFLAGS="-arch x86_64" LDFLAGS="-arch x86_64" --disable-shared --enable-static
+          make -C libusb -j$(sysctl -n hw.logicalcpu)
+
+      - name: Create universal libusb
+        run: |
+          mkdir -p universal/lib universal/include/libusb-1.0
+          lipo -create \
+            libusb/build-arm64/libusb/.libs/libusb-1.0.a \
+            libusb/build-x86_64/libusb/.libs/libusb-1.0.a \
+            -output universal/lib/libusb-1.0.a
+          cp libusb/libusb/libusb.h universal/include/libusb-1.0/
+
+      - name: Build macOS minichlink assets
+        run: |
+          cd minichlink
+          make clean
+          make ARCH=arm64 \
+            LIBUSB_INCS="-I$(pwd)/../universal/include/libusb-1.0" \
+            LIBUSB_LIBS="$(pwd)/../universal/lib/libusb-1.0.a"
+          mkdir -p ../dist/arm64
+          cp minichlink minichlink.so ../dist/arm64/
+          make clean
+          make ARCH=x86_64 \
+            LIBUSB_INCS="-I$(pwd)/../universal/include/libusb-1.0" \
+            LIBUSB_LIBS="$(pwd)/../universal/lib/libusb-1.0.a"
+          mkdir -p ../dist/x86_64
+          cp minichlink minichlink.so ../dist/x86_64/
+
+      - name: Package macOS assets
+        run: |
+          mkdir -p dist/universal
+          lipo -create dist/arm64/minichlink dist/x86_64/minichlink -output dist/universal/minichlink
+          lipo -create dist/arm64/minichlink.so dist/x86_64/minichlink.so -output dist/universal/minichlink.so
+          tar czf dist/minichlink-b003fast-macos-arm64.tar.gz -C dist/arm64 .
+          tar czf dist/minichlink-b003fast-macos-x86_64.tar.gz -C dist/x86_64 .
+          tar czf dist/minichlink-b003fast-macos-universal.tar.gz -C dist/universal .
+          (cd dist && shasum -a 256 minichlink-b003fast-macos-*.tar.gz > SHA256SUMS-macos.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minichlink-macos-test-release
+          path: |
+            dist/minichlink-b003fast-macos-arm64.tar.gz
+            dist/minichlink-b003fast-macos-x86_64.tar.gz
+            dist/minichlink-b003fast-macos-universal.tar.gz
+            dist/SHA256SUMS-macos.txt
+
+  release:
+    if: ${{ inputs.create_release }}
+    needs: [linux-windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create or update prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          mkdir -p flat-assets
+          find release-assets -maxdepth 3 -type f -print -exec cp {} flat-assets/ \;
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" flat-assets/* --clobber
+          else
+            gh release create "$TAG" flat-assets/* \
+              --title "$TAG" \
+              --prerelease \
+              --notes "Test minichlink build for b003fast host-side stability work."
+          fi
