@@ -992,7 +992,11 @@ RV_STATIC_INLINE void funPinAF(u32 pin, u32 af)
 
 #else
 #define funGpioInitAll() { RCC->APB2PCENR |= ( RCC_APB2Periph_AFIO | RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD ); }
-#define funPinMode( pin, mode ) { GpioOf(pin)->CFGLR = (GpioOf(pin)->CFGLR & (~(0xf<<(4*((pin)&0xf))))) | ((mode)<<(4*((pin)&0xf))); }
+#define funPinMode( pin, mode ) { \
+	GpioOf(pin)->CFGLR = (GpioOf(pin)->CFGLR & (~(0xf<<(4*((pin)&0xf))))) | (((mode)&0xf)<<(4*((pin)&0xf))); \
+	if (((mode)&0xff) == GPIO_Mode_IPU) (GpioOf(pin)->BSHR = (1 << ((pin)&0xf))); \
+	if (((mode)&0xff) == GPIO_Mode_IPD) (GpioOf(pin)->BSHR = (1 << (((pin)&0xf) + 16))); \
+}
 #endif
 
 #define funGpioInitA() { RCC->APB2PCENR |= ( RCC_APB2Periph_AFIO | RCC_APB2Periph_GPIOA ); }
