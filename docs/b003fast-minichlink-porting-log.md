@@ -34,7 +34,7 @@ the bootloader firmware stays unchanged; this pass only changes host-side
 | Dropped | `5a3953e`, `03d80ae` | CRC during write | Not ported | Previously measured slower and removed from mainline. | Historical result only. |
 | Dropped | `3bc83f0`, `2762d31` | All-FF page skip | Not ported | Removed from the old mainline because real uploads rarely benefit. | Historical result only. |
 | Dropped | `f444f22` | USER direct open experiment | Not ported | The experiment was withdrawn in the old fork. | Historical result only. |
-| Included | `13b626e` | Manual test release workflow | `7d59959` | Adds a workflow_dispatch path to build Linux, Windows, and macOS test assets plus SHA256 files. | Workflow not run yet. |
+| Included | `13b626e` | Manual test release workflow | `7d59959`, `1389b13` | Adds a workflow_dispatch path and packages tag-named assets with a single archive root. The first Windows Board Manager test asset was published manually because `workflow_dispatch` requires the workflow file to exist on the default branch. | [Test release report](b003fast-minichlink-test-release.md) records the published asset, checksum, install result, and upload test. |
 | Deferred | `73b09f4` | Third-party notices and final package metadata | Not ported in this pass | Final release contents and package-index URLs should be handled after hardware validation. | Future release/package-index work. |
 
 ## Test Release Gate
