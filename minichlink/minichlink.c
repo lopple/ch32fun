@@ -41,7 +41,20 @@ struct MiniChlinkFunctions MCF;
 #define B803BOOT_LEGACY_VIDPID 0x1209b803
 #define B003FAST_TEST_VIDPID   0x1209000a
 
-void * MiniCHLinkInitAsDLL( struct MiniChlinkFunctions ** MCFO, const init_hints_t* init_hints )
+static uint32_t HostCRC32( const uint8_t * data, uint32_t length )
+{
+	uint32_t crc = 0xffffffffu;
+	for( uint32_t i = 0; i < length; i++ )
+	{
+		crc ^= data[i];
+		for( int bit = 0; bit < 8; bit++ )
+		{
+			uint32_t mask = 0u - ( crc & 1u );
+			crc = ( crc >> 1 ) ^ ( 0xedb88320u & mask );
+		}
+	}
+	return crc ^ 0xffffffffu;
+}void * MiniCHLinkInitAsDLL( struct MiniChlinkFunctions ** MCFO, const init_hints_t* init_hints )
 {
 	void * dev = 0;
 	
@@ -211,6 +224,7 @@ int main( int argc, char ** argv )
 
 	int status;
 	int must_be_end = 0;
+	int verify_write_crc32 = 0;
 
 	int skip_startup = 
 		(argc > 1 && argv[1][0] == '-' && argv[1][1] == 'k' ) |
@@ -780,6 +794,59 @@ keep_going:
 						goto unimplemented;
 				break;
 			}
+			case 'V':
+			{
+				verify_write_crc32 = 1;
+				break;
+			}
+			case 'H':
+			{
+				if( MCF.HaltMode ) MCF.HaltMode( dev, HALT_MODE_HALT_BUT_NO_RESET );
+
+				if( argchar[2] != 0 )
+				{
+					fprintf( stderr, "Error: can't have char after paramter field\n" );
+					goto help;
+				}
+				iarg++;
+				argchar = 0; // Stop advancing
+				if( iarg + 1 >= argc )
+				{
+					fprintf( stderr, "Error: missing address/size for -H.\n" );
+					goto help;
+				}
+
+				uint64_t offset = StringToMemoryAddress( dev, argv[iarg++] );
+				uint64_t amount = SimpleReadNumberInt( argv[iarg], -1 );
+				if( amount > 0xffffffffu )
+				{
+					fprintf( stderr, "Error: CRC32 size is too large\n" );
+					return -9;
+				}
+
+				if( !CheckMemoryLocation( dev, DEFAULT_AREA, offset, amount ) )
+				{
+					fprintf( stderr, "Error: memory address is out of range\n" );
+					return -9;
+				}
+
+				uint32_t crc32 = 0;
+				if( MCF.HashBinaryBlob )
+				{
+					if( MCF.HashBinaryBlob( dev, offset, amount, &crc32 ) < 0 )
+					{
+						fprintf( stderr, "Fault hashing device memory\n" );
+						return -12;
+					}
+				}
+				else
+				{
+					goto unimplemented;
+				}
+
+				printf( "crc32=0x%08x address=0x%08x length=%u\n", crc32, (uint32_t)offset, (uint32_t)amount );
+				break;
+			}
 			case 'r':
 			{
 				if( argchar[2] != 0 )
@@ -1009,6 +1076,32 @@ keep_going:
 
 				printf( "\nImage written.\n" );
 
+				if( verify_write_crc32 )
+				{
+					if( !MCF.HashBinaryBlob )
+					{
+						free( image );
+						goto unimplemented;
+					}
+
+					uint32_t expected_crc32 = HostCRC32( image, len );
+					uint32_t actual_crc32 = 0;
+					if( MCF.HashBinaryBlob( dev, offset, len, &actual_crc32 ) < 0 )
+					{
+						fprintf( stderr, "Fault hashing written image\n" );
+						free( image );
+						return -14;
+					}
+					printf( "verify_crc32 expected=0x%08x actual=0x%08x\n", expected_crc32, actual_crc32 );
+					if( actual_crc32 != expected_crc32 )
+					{
+						fprintf( stderr, "Error: CRC32 verify mismatch\n" );
+						free( image );
+						return -15;
+					}
+					printf( "crc32_match=true\n" );
+				}
+
 				free( image );
 				break;
 			}
@@ -1091,6 +1184,7 @@ help:
 	fprintf( stderr, " -D Configure NRST as GPIO\n" );
 	fprintf( stderr, " -d Configure NRST as NRST\n" );
 	fprintf( stderr, " -i Show chip info\n" );
+	fprintf( stderr, " -V Verify following -w writes with target-side CRC32\n" );
 	fprintf( stderr, " -s [debug register] [value]\n" );
 	fprintf( stderr, " -m [debug register]\n" );
 	fprintf( stderr, " -T Terminal Only (must be last arg)\n" );
@@ -1102,6 +1196,7 @@ help:
 	fprintf( stderr, " -S set FLASH/SRAM split [FLASH kbytes] [SRAM kbytes]\n" );
 	fprintf( stderr, " -w [binary image to write] [address, decimal or 0x, try0x08000000]\n" );
 	fprintf( stderr, " -r [output binary image] [memory address, decimal or 0x, try 0x08000000] [size, decimal or 0x, try 16384]\n" );
+	fprintf( stderr, " -H [memory address, decimal or 0x, try 0x08000000] [size, decimal or 0x, try 16384] Print target-side CRC32\n" );
 	fprintf( stderr, "   Note: for memory addresses, you can use 'flash' 'bootloader' 'option' 'eeprom' 'ram' and say \"ram+0x10\" for instance\n" );
 	fprintf( stderr, "   For filename, you can use - for raw (terminal) or + for hex (inline).\n" );
 	fprintf( stderr, " -X [programmer-specific command, for esp32-s2 programmer, -X ECLK:1:0:0:8:3 for 24MHz clock out]\n" );
