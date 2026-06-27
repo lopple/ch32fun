@@ -19,6 +19,9 @@ void Sleep(uint32_t dwMilliseconds);
 
 #define MAX_USB_ERR 10000
 #define TERMINAL_FEATURE_ID 0xFD
+#define B003FUN_CRC32_LOADER_ADDR 0x20000500
+#define B003FUN_CRC32_PARAM_OFFSET 32
+#define B003FUN_CRC32_RESULT_OFFSET 56
 
 struct B003FunProgrammerStruct
 {
@@ -33,6 +36,7 @@ struct B003FunProgrammerStruct
 	int scratchpad_size;
 	int scratchpad_data_size;
 	int no_eight_byte;
+	int crc32_loader_uploaded;
 };
 
 static const unsigned char byte_wise_read_blob[] = { // No alignment restrictions.
@@ -68,6 +72,17 @@ static const unsigned char word_wise_write_blob[] = { // size and address must b
 	0x14, 0xc1, 0x82, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 */
 };
 
+static const unsigned char call_crc32[] = {
+	0x13, 0x07, 0x05, 0x02, 0x0c, 0x43, 0x50, 0x43, 0x14, 0x47, 0x82, 0x86,
+};
+
+static const unsigned char ram_crc32[] = {
+	0x7d, 0x57, 0x37, 0x83, 0xb8, 0xed, 0x13, 0x03, 0x03, 0x32, 0x15, 0xc2,
+	0x83, 0xc7, 0x05, 0x00, 0x3d, 0x8f, 0xa1, 0x42, 0x93, 0x73, 0x17, 0x00,
+	0x05, 0x83, 0x63, 0x84, 0x03, 0x00, 0x33, 0x47, 0x67, 0x00, 0xfd, 0x12,
+	0xe3, 0x98, 0x02, 0xfe, 0x85, 0x05, 0x7d, 0x16, 0x65, 0xf2, 0xfd, 0x56,
+	0x35, 0x8f, 0x93, 0x07, 0x85, 0x03, 0x98, 0xc3, 0x14, 0xc1, 0x82, 0x80,
+};
 static const unsigned char write64_flash[] = { // size and address must be aligned by 4.
 	0x13, 0x07, 0x45, 0x03, 0x0c, 0x43, 0x13, 0x86, 0x05, 0x04, 0x5c, 0x43,
 	0x8c, 0xc7, 0x14, 0x47, 0x94, 0xc1, 0xb7, 0x06, 0x05, 0x00, 0xd4, 0xc3,
@@ -571,6 +586,51 @@ static int B003FunReadBinaryBlob( void * dev, uint32_t address_to_read_from, uin
 	return 0;
 }
 
+static int B003FunEnsureCrc32Loader( struct B003FunProgrammerStruct * eps )
+{
+	if( eps->crc32_loader_uploaded )
+	{
+		return 0;
+	}
+
+	int r = InternalB003FunWriteBinaryBlob( eps, B003FUN_CRC32_LOADER_ADDR, sizeof( ram_crc32 ), ram_crc32 );
+	if( r )
+	{
+		return r;
+	}
+	eps->crc32_loader_uploaded = 1;
+	return 0;
+}
+
+static int B003FunHashBinaryBlob( void * dev, uint32_t address_to_read_from, uint32_t read_size, uint32_t * crc32_out )
+{
+	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct *)dev;
+
+	if( address_to_read_from < 0x01000000 )
+	{
+		address_to_read_from |= 0x08000000;
+	}
+
+	int r = B003FunEnsureCrc32Loader( eps );
+	if( r )
+	{
+		return r;
+	}
+
+	ResetOp( eps );
+	WriteOpArb( eps, call_crc32, sizeof( call_crc32 ) );
+	memcpy( &eps->commandbuffer[B003FUN_CRC32_PARAM_OFFSET], &address_to_read_from, 4 );
+	memcpy( &eps->commandbuffer[B003FUN_CRC32_PARAM_OFFSET + 4], &read_size, 4 );
+	uint32_t loader_addr = B003FUN_CRC32_LOADER_ADDR;
+	memcpy( &eps->commandbuffer[B003FUN_CRC32_PARAM_OFFSET + 8], &loader_addr, 4 );
+	if( MCF.PrepForLongOp ) MCF.PrepForLongOp( eps );
+	int send_len = B003FUN_CRC32_PARAM_OFFSET + 12 - eps->commandplace;
+	int receive_len = B003FUN_CRC32_RESULT_OFFSET + 4 - eps->commandplace;
+	if( CommitOp( eps, send_len, receive_len ) ) return -5;
+
+	memcpy( crc32_out, &eps->respbuffer[B003FUN_CRC32_RESULT_OFFSET], 4 );
+	return 0;
+}
 static int InternalB003FunBoot( void * dev )
 {
 	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct*) dev;
@@ -1220,6 +1280,7 @@ void * TryInit_B003Fun(uint32_t id)
 	MCF.BlockWrite64 = B003FunBlockWrite64;
 	MCF.WriteBinaryBlob = B003FunWriteBinaryBlob;
 	MCF.ReadBinaryBlob = B003FunReadBinaryBlob;
+	MCF.HashBinaryBlob = B003FunHashBinaryBlob;
 	MCF.Erase = B003FunErase;
 
 	MCF.PrepForLongOp = B003FunPrepForLongOp;
