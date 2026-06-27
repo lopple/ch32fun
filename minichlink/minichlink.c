@@ -37,6 +37,21 @@ static void readCSR( void * dev, uint32_t csr );
 static int DefaultRebootIntoBootloader( void * dev );
 struct MiniChlinkFunctions MCF;
 
+static uint32_t HostCRC32( const uint8_t * data, uint32_t length )
+{
+	uint32_t crc = 0xffffffffu;
+	for( uint32_t i = 0; i < length; i++ )
+	{
+		crc ^= data[i];
+		for( int bit = 0; bit < 8; bit++ )
+		{
+			uint32_t mask = 0u - ( crc & 1u );
+			crc = ( crc >> 1 ) ^ ( 0xedb88320u & mask );
+		}
+	}
+	return crc ^ 0xffffffffu;
+}
+
 #define B003BOOT_LEGACY_VIDPID 0x1209b003
 #define B803BOOT_LEGACY_VIDPID 0x1209b803
 #define B003FAST_TEST_VIDPID   0x1209000a
@@ -211,6 +226,7 @@ int main( int argc, char ** argv )
 
 	int status;
 	int must_be_end = 0;
+	int verify_write_crc32 = 0;
 
 	int skip_startup = 
 		(argc > 1 && argv[1][0] == '-' && argv[1][1] == 'k' ) |
@@ -780,6 +796,11 @@ keep_going:
 						goto unimplemented;
 				break;
 			}
+			case 'V':
+			{
+				verify_write_crc32 = 1;
+				break;
+			}
 			case 'H':
 			{
 				if( MCF.HaltMode ) MCF.HaltMode( dev, HALT_MODE_HALT_BUT_NO_RESET );
@@ -1057,6 +1078,32 @@ keep_going:
 
 				printf( "\nImage written.\n" );
 
+				if( verify_write_crc32 )
+				{
+					if( !MCF.HashBinaryBlob )
+					{
+						free( image );
+						goto unimplemented;
+					}
+
+					uint32_t expected_crc32 = HostCRC32( image, len );
+					uint32_t actual_crc32 = 0;
+					if( MCF.HashBinaryBlob( dev, offset, len, &actual_crc32 ) < 0 )
+					{
+						fprintf( stderr, "Fault hashing written image\n" );
+						free( image );
+						return -14;
+					}
+					printf( "verify_crc32 expected=0x%08x actual=0x%08x\n", expected_crc32, actual_crc32 );
+					if( actual_crc32 != expected_crc32 )
+					{
+						fprintf( stderr, "Error: CRC32 verify mismatch\n" );
+						free( image );
+						return -15;
+					}
+					printf( "crc32_match=true\n" );
+				}
+
 				free( image );
 				break;
 			}
@@ -1139,6 +1186,7 @@ help:
 	fprintf( stderr, " -D Configure NRST as GPIO\n" );
 	fprintf( stderr, " -d Configure NRST as NRST\n" );
 	fprintf( stderr, " -i Show chip info\n" );
+	fprintf( stderr, " -V Verify following -w writes with target-side CRC32\n" );
 	fprintf( stderr, " -s [debug register] [value]\n" );
 	fprintf( stderr, " -m [debug register]\n" );
 	fprintf( stderr, " -T Terminal Only (must be last arg)\n" );
