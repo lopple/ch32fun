@@ -43,22 +43,27 @@ jobs:
           OS=Windows_NT make -j$(nproc) minichlink.exe
 
       - name: Package Linux and Windows assets
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          mkdir -p dist/linux-x86_64 dist/windows-x86_64
+          ASSET_TAG="${RELEASE_TAG//\//-}"
+          LINUX_ROOT="minichlink-b003fast-${ASSET_TAG}-linux-x86_64"
+          WINDOWS_ROOT="minichlink-b003fast-${ASSET_TAG}-windows-x86_64"
+          mkdir -p "dist/${LINUX_ROOT}" "dist/${WINDOWS_ROOT}"
           cp minichlink/minichlink minichlink/minichlink.so \
             minichlink/99-minichlink.rules minichlink/99-minichlink-uiap.rules \
-            dist/linux-x86_64/
-          cp minichlink/minichlink.exe dist/windows-x86_64/
-          tar czf dist/minichlink-b003fast-linux-x86_64.tar.gz -C dist/linux-x86_64 .
-          (cd dist/windows-x86_64 && zip -9 ../minichlink-b003fast-windows-x86_64.zip minichlink.exe)
-          (cd dist && sha256sum minichlink-b003fast-linux-x86_64.tar.gz minichlink-b003fast-windows-x86_64.zip > SHA256SUMS-linux-windows.txt)
+            "dist/${LINUX_ROOT}/"
+          cp minichlink/minichlink.exe "dist/${WINDOWS_ROOT}/"
+          tar czf "dist/${LINUX_ROOT}.tar.gz" -C dist "${LINUX_ROOT}"
+          (cd dist && zip -9 -r "${WINDOWS_ROOT}.zip" "${WINDOWS_ROOT}")
+          (cd dist && sha256sum "${LINUX_ROOT}.tar.gz" "${WINDOWS_ROOT}.zip" > SHA256SUMS-linux-windows.txt)
 
       - uses: actions/upload-artifact@v4
         with:
           name: minichlink-linux-windows-test-release
           path: |
-            dist/minichlink-b003fast-linux-x86_64.tar.gz
-            dist/minichlink-b003fast-windows-x86_64.zip
+            dist/minichlink-b003fast-*.tar.gz
+            dist/minichlink-b003fast-*.zip
             dist/SHA256SUMS-linux-windows.txt
 
   macos:
@@ -109,22 +114,29 @@ jobs:
           cp minichlink minichlink.so ../dist/x86_64/
 
       - name: Package macOS assets
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          mkdir -p dist/universal
+          ASSET_TAG="${RELEASE_TAG//\//-}"
+          ARM64_ROOT="minichlink-b003fast-${ASSET_TAG}-macos-arm64"
+          X86_64_ROOT="minichlink-b003fast-${ASSET_TAG}-macos-x86_64"
+          UNIVERSAL_ROOT="minichlink-b003fast-${ASSET_TAG}-macos-universal"
+          mkdir -p "dist/${ARM64_ROOT}" "dist/${X86_64_ROOT}" "dist/${UNIVERSAL_ROOT}" dist/universal
           lipo -create dist/arm64/minichlink dist/x86_64/minichlink -output dist/universal/minichlink
           lipo -create dist/arm64/minichlink.so dist/x86_64/minichlink.so -output dist/universal/minichlink.so
-          tar czf dist/minichlink-b003fast-macos-arm64.tar.gz -C dist/arm64 .
-          tar czf dist/minichlink-b003fast-macos-x86_64.tar.gz -C dist/x86_64 .
-          tar czf dist/minichlink-b003fast-macos-universal.tar.gz -C dist/universal .
-          (cd dist && shasum -a 256 minichlink-b003fast-macos-*.tar.gz > SHA256SUMS-macos.txt)
+          cp dist/arm64/minichlink dist/arm64/minichlink.so "dist/${ARM64_ROOT}/"
+          cp dist/x86_64/minichlink dist/x86_64/minichlink.so "dist/${X86_64_ROOT}/"
+          cp dist/universal/minichlink dist/universal/minichlink.so "dist/${UNIVERSAL_ROOT}/"
+          tar czf "dist/${ARM64_ROOT}.tar.gz" -C dist "${ARM64_ROOT}"
+          tar czf "dist/${X86_64_ROOT}.tar.gz" -C dist "${X86_64_ROOT}"
+          tar czf "dist/${UNIVERSAL_ROOT}.tar.gz" -C dist "${UNIVERSAL_ROOT}"
+          (cd dist && shasum -a 256 minichlink-b003fast-*.tar.gz > SHA256SUMS-macos.txt)
 
       - uses: actions/upload-artifact@v4
         with:
           name: minichlink-macos-test-release
           path: |
-            dist/minichlink-b003fast-macos-arm64.tar.gz
-            dist/minichlink-b003fast-macos-x86_64.tar.gz
-            dist/minichlink-b003fast-macos-universal.tar.gz
+            dist/minichlink-b003fast-*.tar.gz
             dist/SHA256SUMS-macos.txt
 
   release:
@@ -140,14 +152,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ github.sha }}
         run: |
           mkdir -p flat-assets
           find release-assets -maxdepth 3 -type f -print -exec cp {} flat-assets/ \;
+          cat > release-notes.md <<EOF
+          Test minichlink build for b003fast host-side stability work.
+
+          Source commit: \`$SOURCE_SHA\`
+
+          The archives are intended for Board Manager test-package validation and contain a single top-level directory.
+          EOF
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" flat-assets/* --clobber
           else
             gh release create "$TAG" flat-assets/* \
+              --target "$SOURCE_SHA" \
               --title "$TAG" \
               --prerelease \
-              --notes "Test minichlink build for b003fast host-side stability work."
+              --notes-file release-notes.md
           fi
