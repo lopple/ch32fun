@@ -749,7 +749,7 @@ static int InternalB003FunBoot( void * dev )
 	if( B003FunEnvEnabledDefault( "B003FUN_WAIT_USER_AFTER_BOOT", 1 ) )
 	{
 		int poll_ms = B003FunEnvInt( "B003FUN_USER_SCAN_POLL_MS", 50, 1, 1000 );
-		int timeout_ms = B003FunEnvInt( "B003FUN_USER_SCAN_TIMEOUT_MS", 5000, 100, 30000 );
+		int timeout_ms = B003FunEnvInt( "B003FUN_USER_SCAN_TIMEOUT_MS", 15000, 100, 30000 );
 		uint32_t attempts = 0;
 		uint64_t wait_start_ms = B003FunTimingNowMS();
 		B003FunTimingPrintCount( "boot_user_wait_poll_ms", (uint32_t)poll_ms );
