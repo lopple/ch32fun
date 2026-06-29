@@ -650,6 +650,12 @@ static int B003FunSetupInterface( void * dev )
 
 static int B003FunExit( void * dev )
 {
+	struct B003FunProgrammerStruct * eps = (struct B003FunProgrammerStruct*) dev;
+	if( eps->hd )
+	{
+		hid_close( eps->hd );
+		eps->hd = 0;
+	}
 	return 0;
 }
 
@@ -1112,33 +1118,42 @@ static int B003FunGetUUID(void * dev, uint8_t * buffer)
 	return ret;
 }
 
+// Accept both the upstream rv003usb PID and the UIAPduino HID monitor PID as
+// user firmware reset sources. Both understand the rv003usb SET_REPORT 0xfd
+// bootloader magic packet and should re-enumerate as the requested B003 device.
+static hid_device * TryRebootUserHIDIntoB003(uint32_t id)
+{
+	const uint16_t user_pids[] = { 0xc003, 0xd003 };
+	int i;
+	for( i = 0; i < (int)( sizeof( user_pids ) / sizeof( user_pids[0] ) ); i++ )
+	{
+		hid_device * user_hd = hid_open( 0x1209, user_pids[i], 0 );
+		if( !user_hd ) continue;
+		fprintf( stderr, "Trying to reboot 1209:%04x into bootloader\n", user_pids[i] );
+		uint8_t buffer[7] = { 0xfd, 0x12, 0x34, 0xaa, 0xbb, 0xcc, 0xdd };
+		int r = hid_send_feature_report( user_hd, buffer, sizeof( buffer ) );
+		hid_close( user_hd );
+		if( r < 0 ) continue;
+		fprintf( stderr, "Sent magic packet\n" );
+		for( int j = 0; j < 20; j++ )
+		{
+			hid_device * hd = hid_open( id>>16, id&0xFFFF, 0 );
+			if( hd ) return hd;
+			usleep( 250000 );
+		}
+	}
+	return 0;
+}
+
 void * TryInit_B003Fun(uint32_t id)
 {
 	hid_init();
 	fprintf( stderr, "VID:0x%04x, PID:0x%04x\n", id>>16, id&0xFFFF );
 	hid_device * hd = hid_open( id>>16, id&0xFFFF, 0); // third parameter is "serial"
-	if( !hd ) {
-		hd = hid_open(0x1209, 0xd003, 0);	//	Looking for default rv003usb device
-		if (!hd) {
-			return 0;
-		} else {
-			fprintf( stderr, "Trying to reboot into bootloader\n");
-			uint8_t buffer[7] = { 0xfd, 0x12, 0x34, 0xaa, 0xbb, 0xcc, 0xdd };
-			hid_send_feature_report(hd, buffer, sizeof(buffer));	// Sending magic soft reboot command
-			fprintf( stderr, "Sent magic packet\n");
-			memset(buffer, 0, 7);
-			int r2 = hid_get_feature_report(hd, buffer, 7);
-			// I wish we had a better way to know if target understands our magic command
-			if (r2 < 0) {
-				for (int i = 0; i < 5; i++) {
-					hd = hid_open( id>>16, id&0xFFFF, 0);
-					if (hd) break;
-					sleep(1);
-				}
-			}
-			// hd = hid_open( id>>16, id&0xFFFF, 0);
-			if (!hd) return 0;
-		}
+	if( !hd )
+	{
+		hd = TryRebootUserHIDIntoB003( id );
+		if( !hd ) return 0;
 	}
 
 	//extern int g_hidapiSuppress;
