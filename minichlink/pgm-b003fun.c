@@ -1394,6 +1394,23 @@ static hid_device * B003FunOpenBootloaderSettled( uint32_t bootloader_id )
 	return 0;
 }
 
+static hid_device * B003FunOpenVendorInterfaceByVidPid( uint16_t vid, uint16_t pid )
+{
+	hid_device * user_hd = 0;
+	struct hid_device_info * devs = hid_enumerate( vid, pid );
+	struct hid_device_info * cur;
+	for( cur = devs; cur; cur = cur->next )
+	{
+		if( cur->usage_page == 0xff00 )
+		{
+			user_hd = hid_open_path( cur->path );
+			break;
+		}
+	}
+	hid_free_enumeration( devs );
+	return user_hd;
+}
+
 static hid_device * B003FunOpenUserVendorInterface( uint32_t * attempts_out, int poll_ms, int timeout_ms )
 {
 	hid_device * user_hd = 0;
@@ -1402,17 +1419,7 @@ static hid_device * B003FunOpenUserVendorInterface( uint32_t * attempts_out, int
 	while( !user_hd && B003FunTimingNowMS() - scan_start_ms < (uint64_t)timeout_ms )
 	{
 		attempts++;
-		struct hid_device_info * devs = hid_enumerate( B003FUN_FAST_USER_VIDPID >> 16, B003FUN_FAST_USER_VIDPID & 0xffff );
-		struct hid_device_info * cur;
-		for( cur = devs; cur; cur = cur->next )
-		{
-			if( cur->usage_page == 0xff00 )
-			{
-				user_hd = hid_open_path( cur->path );
-				break;
-			}
-		}
-		hid_free_enumeration( devs );
+		user_hd = B003FunOpenVendorInterfaceByVidPid( B003FUN_FAST_USER_VIDPID >> 16, B003FUN_FAST_USER_VIDPID & 0xffff );
 		if( !user_hd ) usleep( poll_ms * 1000 );
 	}
 	if( attempts_out ) *attempts_out = attempts;
@@ -1444,6 +1451,35 @@ static hid_device * B003FunTryUserFeatureBootReset( uint32_t bootloader_id )
 	return B003FunOpenBootloaderSettled( bootloader_id );
 }
 
+static hid_device * B003FunTryRv003usbMagicBootReset( uint32_t bootloader_id )
+{
+	const uint16_t user_pids[] = { 0xc003, 0xd003 };
+	int i;
+	for( i = 0; i < (int)( sizeof( user_pids ) / sizeof( user_pids[0] ) ); i++ )
+	{
+		hid_device * user_hd = B003FunOpenVendorInterfaceByVidPid( 0x1209, user_pids[i] );
+		if( !user_hd && user_pids[i] == 0xd003 )
+		{
+			// Older rv003usb examples are single-interface devices, so there may
+			// be no interface choice to make. C003 is composite in UIAPduino,
+			// so do not fall back there or Windows may hand us mouse/keyboard.
+			user_hd = hid_open( 0x1209, user_pids[i], 0 );
+		}
+		if( !user_hd ) continue;
+
+		fprintf( stderr, "Trying to reboot 1209:%04x into bootloader\n", user_pids[i] );
+		uint8_t buffer[7] = { 0xfd, 0x12, 0x34, 0xaa, 0xbb, 0xcc, 0xdd };
+		int r = hid_send_feature_report( user_hd, buffer, sizeof( buffer ) );
+		hid_close( user_hd );
+		if( r < 0 ) continue;
+
+		fprintf( stderr, "Sent magic packet\n" );
+		fprintf( stderr, "Waiting for bootloader HID re-enumeration\n" );
+		return B003FunOpenBootloaderSettled( bootloader_id );
+	}
+	return 0;
+}
+
 void * TryInit_B003Fun(uint32_t id)
 {
 	hid_init();
@@ -1454,26 +1490,9 @@ void * TryInit_B003Fun(uint32_t id)
 		hd = B003FunTryUserFeatureBootReset( id );
 	}
 	if( !hd ) {
-		hd = hid_open(0x1209, 0xd003, 0);	//	Looking for default rv003usb device
+		hd = B003FunTryRv003usbMagicBootReset( id );
 		if (!hd) {
 			return 0;
-		} else {
-			fprintf( stderr, "Trying to reboot into bootloader\n");
-			uint8_t buffer[7] = { 0xfd, 0x12, 0x34, 0xaa, 0xbb, 0xcc, 0xdd };
-			hid_send_feature_report(hd, buffer, sizeof(buffer));	// Sending magic soft reboot command
-			fprintf( stderr, "Sent magic packet\n");
-			memset(buffer, 0, 7);
-			int r2 = hid_get_feature_report(hd, buffer, 7);
-			// I wish we had a better way to know if target understands our magic command
-			if (r2 < 0) {
-				for (int i = 0; i < 5; i++) {
-					hd = hid_open( id>>16, id&0xFFFF, 0);
-					if (hd) break;
-					sleep(1);
-				}
-			}
-			// hd = hid_open( id>>16, id&0xFFFF, 0);
-			if (!hd) return 0;
 		}
 	}
 
