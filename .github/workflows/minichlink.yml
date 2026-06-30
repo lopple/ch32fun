@@ -7,6 +7,10 @@ on: [push, pull_request]
 #    pull_request:
 #        paths:
 #            - minichlink/**
+
+env:
+  MINICHLINK_TOOL_VERSION: b003boot-c003-reset-test.2
+
 jobs:
   build-minichlink:
     strategy:
@@ -107,7 +111,7 @@ jobs:
         run: |
           cd minichlink
           make clean
-          make ARCH=arm64 \
+          make ARCH=arm64 VERSION="$MINICHLINK_TOOL_VERSION" \
               LIBUSB_INCS="-I$(pwd)/../universal/include/libusb-1.0" \
               LIBUSB_LIBS="$(pwd)/../universal/lib/libusb-1.0.a"
           mkdir -p ../dist/arm64
@@ -118,7 +122,7 @@ jobs:
         run: |
           cd minichlink
           make clean
-          make ARCH=x86_64 \
+          make ARCH=x86_64 VERSION="$MINICHLINK_TOOL_VERSION" \
               LIBUSB_INCS="-I$(pwd)/../universal/include/libusb-1.0" \
               LIBUSB_LIBS="$(pwd)/../universal/lib/libusb-1.0.a"
           mkdir -p ../dist/x86_64
@@ -161,12 +165,19 @@ jobs:
           mkdir -p tmp/universal
           lipo -create dist/arm64/minichlink dist/x86_64/minichlink -output tmp/universal/minichlink
           lipo -create dist/arm64/minichlink.so dist/x86_64/minichlink.so -output tmp/universal/minichlink.so
-          cd tmp/universal
-          tar czf ../../minichlink-macos-universal.tar.gz *
-          cd ../..
+          tool_root="minichlink-$MINICHLINK_TOOL_VERSION-macos-universal"
+          mkdir -p "tmp/$tool_root/bin"
+          cp tmp/universal/minichlink "tmp/$tool_root/bin/minichlink"
+          cp tmp/universal/minichlink.so "tmp/$tool_root/bin/minichlink.so"
+          chmod +x "tmp/$tool_root/bin/minichlink"
+          archive="minichlink-$MINICHLINK_TOOL_VERSION-macos-universal-arduino-tool.tar.gz"
+          tar czf "$archive" -C tmp "$tool_root"
+          shasum -a 256 "$archive" | sed "s/  / */" > "$archive.sha256"
 
       - uses: actions/upload-artifact@v4
         if: matrix.os == 'macos-latest'
         with:
           name: minichlink (MacOS Universal)
-          path: minichlink-macos-universal.tar.gz
+          path: |
+            minichlink-${{ env.MINICHLINK_TOOL_VERSION }}-macos-universal-arduino-tool.tar.gz
+            minichlink-${{ env.MINICHLINK_TOOL_VERSION }}-macos-universal-arduino-tool.tar.gz.sha256

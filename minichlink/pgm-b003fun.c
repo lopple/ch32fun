@@ -7,6 +7,10 @@
 #include "chips.h"
 #include "../ch32fun/ch32fun.h"
 
+#ifdef __MACOSX__
+#include "libusb.h"
+#endif
+
 // #define DEBUG_B003
 
 #if defined(WINDOWS) || defined(WIN32) || defined(_WIN32)
@@ -24,6 +28,10 @@ struct B003FunProgrammerStruct
 {
 	void * internal; // Part of struct ProgrammerStructBase 
 	hid_device * hd;
+#ifdef __MACOSX__
+	libusb_context * usb_ctx;
+	libusb_device_handle * usb_devh;
+#endif
 	uint8_t commandbuffer[8196];
 	uint8_t respbuffer[8196];
 	int commandplace;
@@ -193,6 +201,51 @@ static void WriteOpArb( struct B003FunProgrammerStruct * eps, const uint8_t * da
 	eps->commandplace = newend;
 }
 
+#ifdef __MACOSX__
+#define B003_USB_TIMEOUT_MS 1000
+
+static int B003FunOpenLibusb( uint32_t id, libusb_context ** ctx, libusb_device_handle ** devh )
+{
+	int r = libusb_init( ctx );
+	if( r < 0 )
+	{
+		fprintf( stderr, "Warning: libusb_init failed for b003boot (%d)\n", r );
+		return -1;
+	}
+	*devh = libusb_open_device_with_vid_pid( *ctx, id>>16, id&0xFFFF );
+	if( !*devh )
+	{
+		fprintf( stderr, "Warning: libusb could not open b003boot device\n" );
+		libusb_exit( *ctx );
+		*ctx = 0;
+		return -1;
+	}
+	return 0;
+}
+#endif
+
+static int B003FunSendFeatureReport( struct B003FunProgrammerStruct * eps, const uint8_t * data, int len )
+{
+#ifdef __MACOSX__
+	if( eps->usb_devh )
+	{
+		return libusb_control_transfer( eps->usb_devh, 0x21, 0x09, (3<<8) | data[0], 0, (unsigned char*)data, len, B003_USB_TIMEOUT_MS );
+	}
+#endif
+	return hid_send_feature_report( eps->hd, data, len );
+}
+
+static int B003FunGetFeatureReport( struct B003FunProgrammerStruct * eps, uint8_t * data, int len )
+{
+#ifdef __MACOSX__
+	if( eps->usb_devh )
+	{
+		return libusb_control_transfer( eps->usb_devh, 0xa1, 0x01, (3<<8) | data[0], 0, data, len, B003_USB_TIMEOUT_MS );
+	}
+#endif
+	return hid_get_feature_report( eps->hd, data, len );
+}
+
 static int CommitOp( struct B003FunProgrammerStruct * eps, int send_data_len, int receive_data_len )
 {
 	int retries = 0;
@@ -235,7 +288,7 @@ static int CommitOp( struct B003FunProgrammerStruct * eps, int send_data_len, in
 	#endif
 
 resend:
-	r = hid_send_feature_report( eps->hd, eps->commandbuffer, pad_size );
+	r = B003FunSendFeatureReport( eps, eps->commandbuffer, pad_size );
 	#ifdef DEBUG_B003
 	printf( "hid_send_feature_report = %d\n", r );
 	#endif
@@ -306,7 +359,7 @@ resend:
 	do
 	{
 		eps->respbuffer[0] = feature_id;
-		r = hid_get_feature_report( eps->hd, eps->respbuffer, pad_size );
+		r = B003FunGetFeatureReport( eps, eps->respbuffer, pad_size );
 
 		#ifdef DEBUG_B003
 		{
@@ -563,20 +616,20 @@ static int B003FunSetupInterface( void * dev )
 
 	// Check for minimum 8 byte feature
 	eps->respbuffer[0] = 0xa8;
-	int r = hid_get_feature_report( eps->hd, eps->respbuffer, 8 );
+	int r = B003FunGetFeatureReport( eps, eps->respbuffer, 8 );
 	if( r != 8 ) eps->no_eight_byte = 1;
 	else eps->no_eight_byte = 0;
 	// Check for the maximum buffer size available
 	eps->respbuffer[0] = 0xad;
 	// 4096 is the maximum size for windows and mac
-	r = hid_get_feature_report( eps->hd, eps->respbuffer, 4096 );
+	r = B003FunGetFeatureReport( eps, eps->respbuffer, 4096 );
 	if( r >= 0 ) // If not on Windows, or guessed the first time
 	{
 		eps->scratchpad_size = r;
 		// Check once more, if we can go higher
 		// On windows and mac it will fail, on linux we will get an actual maximum HID report size
 		eps->respbuffer[0] = 0xb0;
-		r = hid_get_feature_report( eps->hd, eps->respbuffer, 6144+128 );
+		r = B003FunGetFeatureReport( eps, eps->respbuffer, 6144+128 );
 		if( r > eps->scratchpad_size ) eps->scratchpad_size = r;
 	}
 	else
@@ -585,7 +638,7 @@ static int B003FunSetupInterface( void * dev )
 		{
 			int id_size = 5120 - (1024*(0xaf - i)) + 128;
 			eps->respbuffer[0] = i;
-			r = hid_get_feature_report( eps->hd, eps->respbuffer, id_size );
+			r = B003FunGetFeatureReport( eps, eps->respbuffer, id_size );
 			if( r == id_size )
 			{
 				eps->scratchpad_size = id_size;
@@ -656,6 +709,18 @@ static int B003FunExit( void * dev )
 		hid_close( eps->hd );
 		eps->hd = 0;
 	}
+#ifdef __MACOSX__
+	if( eps->usb_devh )
+	{
+		libusb_close( eps->usb_devh );
+		eps->usb_devh = 0;
+	}
+	if( eps->usb_ctx )
+	{
+		libusb_exit( eps->usb_ctx );
+		eps->usb_ctx = 0;
+	}
+#endif
 	return 0;
 }
 
@@ -1071,7 +1136,7 @@ int B003PollTerminal( void * dev, uint8_t * buffer, int maxlen, uint32_t leavefl
 	if( maxlen < 8 ) return -9;
 
 	eps->respbuffer[0] = TERMINAL_FEATURE_ID;
-	r = hid_get_feature_report( eps->hd, eps->respbuffer, 8 );
+	r = B003FunGetFeatureReport( eps, eps->respbuffer, 8 );
 
 	if( (leaveflagA>>8) ) {
 		memset( eps->commandbuffer, 0, 8 );
@@ -1079,7 +1144,7 @@ int B003PollTerminal( void * dev, uint8_t * buffer, int maxlen, uint32_t leavefl
 		*((uint32_t*)eps->commandbuffer+1) = leaveflagB;
 		eps->commandbuffer[0] = TERMINAL_FEATURE_ID;
 		eps->commandbuffer[1] = (leaveflagA>>8) & 0xFF;
-		r = hid_send_feature_report( eps->hd, eps->commandbuffer, 8 );
+		r = B003FunSendFeatureReport( eps, eps->commandbuffer, 8 );
 	}
 
 #if MAX_USB_ERR
@@ -1149,12 +1214,23 @@ void * TryInit_B003Fun(uint32_t id)
 {
 	hid_init();
 	fprintf( stderr, "VID:0x%04x, PID:0x%04x\n", id>>16, id&0xFFFF );
+#ifdef __MACOSX__
+	libusb_context * usb_ctx = 0;
+	libusb_device_handle * usb_devh = 0;
+#endif
 	hid_device * hd = hid_open( id>>16, id&0xFFFF, 0); // third parameter is "serial"
 	if( !hd )
 	{
 		hd = TryRebootUserHIDIntoB003( id );
-		if( !hd ) return 0;
 	}
+#ifdef __MACOSX__
+	if( !hd )
+	{
+		if( B003FunOpenLibusb( id, &usb_ctx, &usb_devh ) ) return 0;
+	}
+#else
+	if( !hd ) return 0;
+#endif
 
 	//extern int g_hidapiSuppress;
 	//g_hidapiSuppress = 1;  // Suppress errors for this device.  (don't do this yet)
@@ -1162,6 +1238,10 @@ void * TryInit_B003Fun(uint32_t id)
 	struct B003FunProgrammerStruct * eps = malloc( sizeof( struct B003FunProgrammerStruct ) );
 	memset( eps, 0, sizeof( *eps ) );
 	eps->hd = hd;
+#ifdef __MACOSX__
+	eps->usb_ctx = usb_ctx;
+	eps->usb_devh = usb_devh;
+#endif
 	eps->commandplace = 1;
 	eps->scratchpad_size = 128;
 	eps->scratchpad_data_size = 64;
