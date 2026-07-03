@@ -1,0 +1,252 @@
+name: Release minichlink
+
+on:
+  push:
+    tags:
+      - 'b003fast-minichlink-rc.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: minichlink-windows-x86_64
+            runner: ubuntu-24.04
+            platform: windows
+          - artifact: minichlink-linux-x86_64
+            runner: ubuntu-24.04
+            platform: linux
+          - artifact: minichlink-macos-x86_64
+            runner: macos-15-intel
+            platform: macos
+            arch: x86_64
+          - artifact: minichlink-macos-arm64
+            runner: macos-14
+            platform: macos
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          root="${{ matrix.artifact }}-${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "root=${root}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux' || matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get -yqq purge man-db || true
+          sudo apt-get install -y --no-install-recommends \
+            build-essential make pkg-config file zip libusb-1.0-0-dev libudev-dev \
+            mingw-w64-x86-64-dev gcc-mingw-w64-x86-64
+
+      - name: Build Linux minichlink
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C minichlink clean
+          make -C minichlink -j"$(nproc)" VERSION="${{ steps.meta.outputs.version }}"
+          file minichlink/minichlink
+          ./minichlink/minichlink 2>&1 | head -n 3 || true
+
+      - name: Package Linux minichlink
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${{ steps.meta.outputs.root }}"
+          mkdir -p "dist/${root}/bin" "dist/${root}/lib/udev/rules.d"
+          cp minichlink/minichlink "dist/${root}/bin/"
+          cp minichlink/minichlink.so "dist/${root}/lib/"
+          cp minichlink/99-minichlink.rules "dist/${root}/lib/udev/rules.d/"
+          cp LICENSE "dist/${root}/"
+          cp minichlink/README.md "dist/${root}/README.md"
+          cat > "dist/${root}/metadata.json" <<EOF
+          {
+            "tool": "minichlink",
+            "version": "${{ steps.meta.outputs.version }}",
+            "target": "linux-x86_64",
+            "commit": "${GITHUB_SHA}"
+          }
+          EOF
+          tar -C dist -czf "${{ matrix.artifact }}-${{ steps.meta.outputs.version }}.tar.gz" "${root}"
+
+      - name: Build Windows minichlink
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C minichlink clean
+          OS=Windows_NT make -C minichlink -j"$(nproc)" minichlink.exe VERSION="${{ steps.meta.outputs.version }}"
+          file minichlink/minichlink.exe
+
+      - name: Package Windows minichlink
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${{ steps.meta.outputs.root }}"
+          mkdir -p "dist/${root}/bin"
+          cp minichlink/minichlink.exe "dist/${root}/bin/"
+          cp minichlink/libusb-1.0.dll "dist/${root}/bin/"
+          cp LICENSE "dist/${root}/"
+          cp minichlink/README.md "dist/${root}/README.md"
+          cat > "dist/${root}/metadata.json" <<EOF
+          {
+            "tool": "minichlink",
+            "version": "${{ steps.meta.outputs.version }}",
+            "target": "windows-x86_64",
+            "commit": "${GITHUB_SHA}"
+          }
+          EOF
+          (cd dist && zip -r "../${{ matrix.artifact }}-${{ steps.meta.outputs.version }}.zip" "${root}")
+
+      - name: Install macOS dependencies
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install autoconf automake libtool pkg-config
+
+      - name: Build static libusb for macOS
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L -o libusb.tar.bz2 https://github.com/libusb/libusb/releases/download/v1.0.29/libusb-1.0.29.tar.bz2
+          tar xjf libusb.tar.bz2
+          mkdir libusb-build
+          cd libusb-build
+          arch_flags="-arch ${{ matrix.arch }}"
+          ../libusb-1.0.29/configure \
+            CFLAGS="${arch_flags}" \
+            LDFLAGS="${arch_flags}" \
+            --disable-shared \
+            --enable-static
+          make -j"$(sysctl -n hw.logicalcpu)"
+          lipo -info libusb/.libs/libusb-1.0.a
+
+      - name: Build macOS minichlink
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C minichlink clean
+          make -C minichlink -j"$(sysctl -n hw.logicalcpu)" \
+            ARCH="${{ matrix.arch }}" \
+            LIBUSB_INCS="-I${GITHUB_WORKSPACE}/libusb-1.0.29/libusb" \
+            LIBUSB_LIBS="${GITHUB_WORKSPACE}/libusb-build/libusb/.libs/libusb-1.0.a" \
+            VERSION="${{ steps.meta.outputs.version }}"
+          file minichlink/minichlink
+          lipo -info minichlink/minichlink
+          ./minichlink/minichlink 2>&1 | head -n 3 || true
+
+      - name: Package macOS minichlink
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="${{ steps.meta.outputs.root }}"
+          mkdir -p "dist/${root}/bin" "dist/${root}/lib"
+          cp minichlink/minichlink "dist/${root}/bin/"
+          cp minichlink/minichlink.so "dist/${root}/lib/"
+          cp LICENSE "dist/${root}/"
+          cp minichlink/README.md "dist/${root}/README.md"
+          cat > "dist/${root}/metadata.json" <<EOF
+          {
+            "tool": "minichlink",
+            "version": "${{ steps.meta.outputs.version }}",
+            "target": "macos-${{ matrix.arch }}",
+            "commit": "${GITHUB_SHA}"
+          }
+          EOF
+          tar -C dist -czf "${{ matrix.artifact }}-${{ steps.meta.outputs.version }}.tar.gz" "${root}"
+
+      - name: Write package checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shasum -a 256 minichlink-*-"${{ steps.meta.outputs.version }}".* > "${{ matrix.artifact }}.sha256"
+          cat "${{ matrix.artifact }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            minichlink-*-${{ steps.meta.outputs.version }}.*
+            ${{ matrix.artifact }}.sha256
+
+  release:
+    name: Publish prerelease
+    needs: build
+    runs-on: ubuntu-24.04
+    if: github.ref_type == 'tag'
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate combined checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shasum -a 256 minichlink-*-"${GITHUB_REF_NAME}".* | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes="release-assets/RELEASE_NOTES.md"
+          cat > "${notes}" <<EOF
+          Release candidate build for minichlink.
+
+          Source: ${GITHUB_REPOSITORY}
+          Commit: ${GITHUB_SHA}
+
+          Assets:
+          - minichlink-windows-x86_64-${tag}.zip
+          - minichlink-linux-x86_64-${tag}.tar.gz
+          - minichlink-macos-x86_64-${tag}.tar.gz
+          - minichlink-macos-arm64-${tag}.tar.gz
+          - SHA256SUMS.txt
+          EOF
+          gh release create "${tag}" \
+            release-assets/minichlink-windows-x86_64-"${tag}".zip \
+            release-assets/minichlink-linux-x86_64-"${tag}".tar.gz \
+            release-assets/minichlink-macos-x86_64-"${tag}".tar.gz \
+            release-assets/minichlink-macos-arm64-"${tag}".tar.gz \
+            release-assets/SHA256SUMS.txt \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "${tag}" \
+            --notes-file "${notes}" \
+            --prerelease
+
